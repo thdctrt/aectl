@@ -367,6 +367,7 @@ cmd_doctor() {
 cmd_selftest() {
   local keep=0
   [ "${1:-}" = "--keep" ] && keep=1
+  ae_running || { echo "ae: '$AE_APP' is not running" >&2; return 3; }
   need ffmpeg
   mkdir -p "$WORK/logs"
   local clip="$WORK/__aetools_clip.mp4" src="testsrc2=size=1280x720:rate=25:duration=6"
