@@ -11,6 +11,7 @@
     "lib.jsx",
     "tests/",
     "skills/",
+    "completions/",
     "README.md",
     "LICENSE"
   ],

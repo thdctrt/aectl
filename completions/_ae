@@ -1,0 +1,112 @@
+#compdef ae aectl
+# zsh completion for ae / aectl. Either
+#   eval "$(ae completion zsh)"                      in ~/.zshrc, or
+#   ae completion zsh > ~/.zfunc/_ae                 with ~/.zfunc in $fpath before compinit.
+# Comp and layer names come from the running AE (read-only, empty when AE is not running).
+
+_ae_names() {  # _ae_names <tag> <description> <ae _names args...>
+  local tag=$1 descr=$2 expl; shift 2
+  local -a names
+  names=(${(f)"$(_call_program $tag ${(q)_ae_bin} _names ${(q)@} 2>/dev/null)"})
+  _wanted $tag expl $descr compadd -a names
+}
+_ae_comps() { _ae_names comps 'comp' comps; }
+_ae_layers() {
+  local comp=${(Q)line[1]}    # first positional argument, set by _arguments
+  [[ -n $comp ]] && _ae_names layers 'layer' layers "$comp"
+}
+
+_ae() {
+  local _ae_bin=$words[1] curcontext=$curcontext state line
+  local -a cmds
+  cmds=(
+    'run:lint and run a .jsx as one undo step'
+    'eval:run JS (an expression is printed)'
+    'check:syntax + ES3 lint only'
+    'dump:print one comp in detail'
+    'tree:project overview + layers of the active comp'
+    'snap:render comp frames to PNG'
+    'sheet:contact sheet from images'
+    'frames:sample a video into a contact sheet'
+    'probe:video size, fps, duration'
+    'save:save the open project'
+    'doctor:check the setup'
+    'selftest:run the self-test in a throwaway comp'
+    'completion:print the shell completion script'
+    'help:show usage'
+  )
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'ae command' cmds
+    return
+  fi
+  local cmd=$words[2]
+  curcontext="${curcontext%:*}-$cmd:"
+  shift words; (( CURRENT-- ))
+
+  local video='_files -g "*.(#i)(mp4|mov|m4v|mkv|webm|avi)(-.)"'
+  local sheetopts=('--cols[sheet columns]:columns:' '--width[cell width in px]:px:')
+  case $cmd in
+    run)
+      _arguments \
+        '1:script:_files -g "*.jsx(-.)"' \
+        '--log[log file]:log file:_files' \
+        '(--undo)--ro[no undo group]' \
+        '(--ro)--undo[force one undo group]' \
+        '--timeout[seconds to wait for the log]:seconds:' ;;
+    check)
+      _arguments '1:script:_files -g "*.jsx(-.)"' ;;
+    eval)
+      _arguments '1:js code:' '--ro[no undo group]' ;;
+    dump)
+      _arguments \
+        '1:comp:_ae_comps' \
+        '--depth[recurse into precomps]:depth:' \
+        '--layer[only this layer]:layer:_ae_layers' \
+        '--no-keys[omit keyframes]' \
+        '--max-keys[keys shown per property]:count:' \
+        '--raw-text[true Source Text (one undo step)]' ;;
+    tree)
+      _arguments '--main[comp whose layers to list]:comp:_ae_comps' ;;
+    snap)
+      _arguments \
+        '1:comp:_ae_comps' \
+        '2:frames (8,44,90 or 0-120\:10):' \
+        '--out[output dir]:dir:_files -/' \
+        '--prefix[file name prefix]:prefix:' \
+        '--res[render resolution]:resolution:(full half third quarter)' \
+        '--sheet[also build a contact sheet]' \
+        '--timeout[seconds to wait for the PNGs]:seconds:' \
+        $sheetopts ;;
+    sheet)
+      _arguments \
+        '1:output png:_files -g "*.png(-.)"' \
+        '*:image:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \
+        $sheetopts ;;
+    frames)
+      _arguments \
+        "1:video:$video" \
+        '--n[number of cells]:count:' \
+        '--from[start, seconds]:seconds:' \
+        '--to[end, seconds]:seconds:' \
+        '--out[sheet png]:file:_files -g "*.png(-.)"' \
+        $sheetopts ;;
+    probe)
+      _arguments "1:video:$video" '--fps[also print the length in comp frames]:fps:' ;;
+    save)
+      _arguments \
+        '--status[only report path and unsaved changes]' \
+        '--backup[copy the .aep to Backups/ first]' \
+        '--as[save to a new file]:project:_files -g "*.aep(|x)(-.)"' ;;
+    selftest)
+      _arguments '--keep[leave the test items in the project]' ;;
+    completion)
+      _arguments '1:shell:(zsh)' ;;
+  esac
+}
+
+if [[ $funcstack[1] == _ae ]]; then
+  _ae "$@"                                   # autoloaded from $fpath
+else
+  (( $+functions[compdef] )) || { autoload -Uz compinit && compinit; }
+  compdef _ae ae aectl                       # sourced / eval'd
+fi

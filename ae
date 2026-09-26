@@ -10,6 +10,7 @@
 #   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
 #   ae save [--backup] [--status] [--as file.aep]
 #   ae doctor                       check node/ffmpeg/AE/permissions/prefs      ae selftest [--keep]
+#   ae completion zsh               zsh completion; add to ~/.zshrc:  eval "$(ae completion zsh)"
 # Exit codes: 0 ok, 1 script logged ERR, 2 usage/syntax/lint error, 3 AE not running / timeout.
 shopt -s nullglob
 
@@ -384,7 +385,30 @@ cmd_selftest() {
   return $rc
 }
 
-usage() { sed -n '2,13p' "$SRC" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+# ---------------------------------------------------------------- shell completion
+cmd_completion() {
+  case "${1:-}" in
+    zsh) cat "$TOOLS/completions/_ae" ;;
+    *) die "usage: ae completion zsh   (then add  eval \"\$(ae completion zsh)\"  to ~/.zshrc)" ;;
+  esac
+}
+
+# ae _names comps | ae _names layers "Comp": one name per line, for completion. Read-only, silent,
+# prints nothing when AE is not running or does not answer within 3 s.
+cmd__names() {
+  ae_running || return 0
+  mkdir -p "$WORK/complete"
+  local f="$WORK/complete/names.jsx" log="$WORK/complete/names.log"
+  case "${1:-}" in
+    comps) printf 'var __a = AE.comps(); for (var __i = 0; __i < __a.length; __i++) { log("N " + __a[__i].name); }\n' > "$f" ;;
+    layers) printf 'var __c = AE.comp(%s); for (var __i = 1; __i <= __c.numLayers; __i++) { log("N " + __c.layer(__i).name); }\n' "$(jsstr "${2:-}")" > "$f" ;;
+    *) return 2 ;;
+  esac
+  RUN_TIMEOUT=3 QUIET=1 run_jsx "$f" "$log" false "ae complete" >/dev/null 2>&1 || return 0
+  sed -n 's/^N //p' "$log" | sort -u
+}
+
+usage() { sed -n '2,14p' "$SRC" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 cmd_check() {
   [ $# -ge 1 ] || die "usage: ae check script.jsx"
@@ -635,6 +659,8 @@ case "$cmd" in
   save) cmd_save "$@" ;;
   doctor) cmd_doctor "$@" ;;
   selftest) cmd_selftest "$@" ;;
+  completion) cmd_completion "$@" ;;
+  _names) cmd__names "$@" ;;
   -h|--help|help) usage 0 ;;
   *) echo "ae: unknown command '$cmd'" >&2; usage 2 ;;
 esac
