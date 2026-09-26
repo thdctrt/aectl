@@ -1,0 +1,15 @@
+{
+  "name": "aectl",
+  "description": "Drive Adobe After Effects from Claude Code.",
+  "owner": {
+    "name": "thdctrt",
+    "url": "https://github.com/thdctrt"
+  },
+  "plugins": [
+    {
+      "name": "aectl",
+      "source": "./",
+      "description": "Inspect and edit After Effects comps from the shell: linted ExtendScript runs as one undo step, frame snapshots, contact sheets."
+    }
+  ]
+}

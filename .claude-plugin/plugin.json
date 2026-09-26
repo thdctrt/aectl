@@ -1,0 +1,12 @@
+{
+  "name": "aectl",
+  "description": "Drive a running Adobe After Effects from Claude Code: inspect comps, run linted ExtendScript as one undo step, render frames to contact sheets.",
+  "version": "1.0.0",
+  "author": {
+    "name": "thdctrt"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/thdctrt/aectl",
+  "repository": "https://github.com/thdctrt/aectl",
+  "keywords": ["after-effects", "extendscript", "motion-graphics", "skill"]
+}

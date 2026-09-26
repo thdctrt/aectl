@@ -1,0 +1,29 @@
+{
+  "name": "aectl",
+  "version": "1.0.0",
+  "description": "Drive Adobe After Effects from the shell or an AI agent: lint + run ExtendScript as one undo step, dump comps, render frames to contact sheets.",
+  "bin": {
+    "ae": "ae",
+    "aectl": "ae"
+  },
+  "files": [
+    "ae",
+    "lib.jsx",
+    "tests/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": ["darwin"],
+  "engines": {
+    "node": ">=12"
+  },
+  "keywords": ["after-effects", "extendscript", "jsx", "adobe", "cli", "motion-graphics", "claude-code", "ai-agent"],
+  "author": "thdctrt",
+  "license": "MIT",
+  "homepage": "https://github.com/thdctrt/aectl",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thdctrt/aectl.git"
+  }
+}
