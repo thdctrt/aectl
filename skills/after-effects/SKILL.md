@@ -62,7 +62,7 @@ ae probe video.mp4 [--fps 25]                                # size, fps (avg + 
                                                              # --fps: length in comp frames at that rate
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 40 checks in a throwaway comp, then cleanup (see below)
+ae selftest [--keep]                                         # 40 checks in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -198,15 +198,3 @@ ExtendScript is ES3, and the CLI lint enforces it:
 
 AE's `Folder.temp` is `.../T/TemporaryItems/`, and a sandboxed shell may be unable to read it. Write files the shell
 must read to `AE.tmp`, or to a path you pass in.
-
-## Self-test
-
-```
-ae selftest            # or: ae selftest --keep   to leave the test items in the project for inspection
-```
-
-It generates a 6 s test clip with ffmpeg (`$TMPDIR/ae-tools/__aetools_clip.mp4`, reused later), then runs `tests/selftest.jsx`, which creates
-`__aetools_test`, `__aetools_test_src`, the folder `__aetools_test_folder` and imports the clip. It checks
-trim/shift/setText (real typewriter expression, plus keyed Source Text)/key/copyEase/replaceFootage/cover/dump, and snaps
-3 frames. It prints `ALL PASS` (40 checks). Then `tests/cleanup.jsx` removes exactly those items; it is idempotent and never
-saves. It never touches existing comps or layers. It does leave two entries in the undo history and makes the project dirty.

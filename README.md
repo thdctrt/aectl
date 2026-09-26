@@ -62,6 +62,12 @@ Two things usually need a one-time click:
    log file your script writes.
 2. macOS asks whether your terminal may control After Effects. Allow it (System Settings > Privacy & Security > Automation).
 
+**zsh completion** (commands, options, `.jsx` and video files, and comp/layer names from the running AE):
+
+```sh
+echo 'eval "$(ae completion zsh)"' >> ~/.zshrc
+```
+
 ## Writing a script
 
 ```js
@@ -92,6 +98,7 @@ full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent h
 | `ae frames video.mp4` / `ae probe video.mp4` | sample a clip into a sheet / size, fps (flags VFR), duration |
 | `ae save [--backup]` | save the project (only when you mean it) |
 | `ae doctor` / `ae selftest` | check the setup / run the self-test |
+| `ae completion zsh` | print the zsh completion script |
 
 Exit codes: 0 ok, 1 the script logged `ERR`, 2 usage or lint error, 3 AE not running or timeout (usually a modal dialog in AE).
 
