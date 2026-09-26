@@ -8,27 +8,33 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 
 | path | what |
 |---|---|
-| `ae` | the CLI, one bash file. Also holds the node helper (syntax check, ES3 lint, `#include` rewriting) as a heredoc |
+| `src/` | the CLI in TypeScript: `cli.ts` (dispatch, usage text), `commands/*.ts`, `lint.ts` (ExtendScript lint), `runner.ts` (osascript, logs, PNG waits), `media.ts` (ffmpeg) |
+| `dist/ae.mjs` | the bundled CLI, **generated** by `npm run build` and committed (the plugin installs from git without a build step). Never edit it by hand |
+| `ae` | launcher: checks the node version, then loads `dist/ae.mjs`. Plain old JS on purpose |
 | `lib.jsx` | ExtendScript library, everything under `AE`. `ae run` prepends it to every script |
-| `tests/selftest.jsx`, `tests/cleanup.jsx` | self-test in a throwaway comp, and its idempotent cleanup |
+| `test/*.test.ts` | vitest suite: lint rules, CLI exit codes and messages, the hook |
+| `tests/selftest.jsx`, `tests/cleanup.jsx` | self-test inside AE, in a throwaway comp, and its idempotent cleanup |
 | `skills/after-effects/SKILL.md` | user and agent reference; shipped as the plugin's skill |
+| `hooks/hooks.json` | plugin hook: `ae hook` lints every `.jsx` Claude writes or edits |
 | `completions/_ae` | zsh completion, printed by `ae completion zsh` |
-| `README.md` | short intro for humans |
 | `package.json`, `.claude-plugin/` | npm package (`aectl`, bins `ae` and `aectl`) and Claude Code plugin/marketplace manifests |
 
 ## Rules
 
-- **`lib.jsx` and `tests/*.jsx` are ES3** (ExtendScript). No `let`/`const`, `=>`, template literals, `[].forEach/map/indexOf`,
-  `"".trim`, `Object.keys`, and no reserved words as bare keys or properties (`o["in"]`, never `o.in`). A syntax error
-  opens a modal dialog in AE that blocks every later call. Run `./ae check` on anything you touch.
-- **`ae` runs on macOS `/bin/bash` 3.2.** No associative arrays, `mapfile`, `${var,,}`, `|&` or `;&`.
-  `nullglob` is on for the whole script. Keep it a single file with no dependencies beyond node, osascript and ffmpeg.
-- **`ae help` prints the header comment of `ae`**: `usage()` shows a fixed line range (`sed -n '2,14p'`). When you add
-  or remove a header line, update that range.
-- **Adding or changing a command** touches five places: the `cmd_*` function and the `case` at the bottom of `ae`,
-  the header comment, the CLI block in `SKILL.md`, the table in `README.md`, and `completions/_ae`.
+- **`lib.jsx` and `tests/*.jsx` are ES3** (ExtendScript). A syntax error opens a modal dialog in AE that blocks every
+  later call. `./ae check` them after every change.
+- **The lint (`src/lint.ts`) encodes what the real engine accepts.** Every rule was checked in AE 2026 with `eval()`
+  inside `try/catch`, which reports a syntax error without a modal dialog. Before adding or changing a rule, verify it
+  the same way (`ae eval 'try { eval("<snippet>"); log("ok") } catch (e) { log(e.message) }' --ro`) and add the case
+  to the tables in `test/lint.test.ts`. Errors are for code AE refuses to compile; code that only fails at runtime
+  gets a warning.
+- **Output contract.** Paths and `PNG`/`SHEET` lines go to stdout, `ae: ...` messages and lint findings to stderr.
+  Exit codes: 0 ok, 1 the script logged `ERR`, 2 usage or lint error, 3 AE not running or timeout. Agents rely on them.
+- **Adding or changing a command** touches: its `cmd*` function in `src/commands/`, `COMMANDS` and `USAGE` in
+  `src/cli.ts`, the CLI block in `SKILL.md`, the table in `README.md`, `completions/_ae`, and a test.
 - **Changing the API** in `lib.jsx`: document it in the API section of `SKILL.md`. If it works around AE behaviour,
-  add a pitfall there too and a check in `tests/selftest.jsx`.
+  add a pitfall there too and a check in `tests/selftest.jsx`. A test fails when the docs mention an `AE.*` member
+  that `lib.jsx` does not define.
 - **Nothing personal in the repo**: no absolute user paths, no real project or comp names in examples or tests.
   Use neutral names (`Main`, `Title`, `Intro`).
 - **Keep `SKILL.md` lean.** Every agent that uses the tool loads it in full (about 4k tokens). Put material that
@@ -40,12 +46,15 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 Without AE (fast, run them always):
 
 ```sh
-bash -n ae && zsh -n completions/_ae
-./ae check lib.jsx && ./ae check tests/selftest.jsx && ./ae check tests/cleanup.jsx
+npm install
+npm run check        # typecheck + build + vitest + fails if the committed dist/ is stale
+zsh -n completions/_ae
 ./ae doctor          # AE-related lines only WARN when AE is not running
 npm pack --dry-run   # the file list must include everything the CLI reads at runtime
 claude plugin validate .
 ```
+
+Commit `dist/ae.mjs` together with the `src/` change that produced it.
 
 With AE running, **in a scratch project, not someone's working one**:
 
@@ -65,5 +74,5 @@ save the project from a test.
 ## Release
 
 1. Bump `version` in both `package.json` and `.claude-plugin/plugin.json` (keep them equal).
-2. Run the checks above, including `ae selftest` against a running AE.
+2. Run the checks above, including `ae selftest` against a running AE, and commit the rebuilt `dist/`.
 3. `npm publish`, and push to `main`. The plugin marketplace installs straight from the GitHub repo.

@@ -1,0 +1,17 @@
+{
+  "description": "Lint After Effects ExtendScript (.jsx) right after Claude writes or edits it, so syntax AE would reject is fixed before the script runs.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/ae\" hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

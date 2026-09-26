@@ -12,7 +12,7 @@ description: Drive a running Adobe After Effects (macOS) from the shell with the
   "Base directory for this skill"). `lib.jsx` and `tests/` sit next to `ae`.
 - First time on a machine, or when a command times out or exits 3: run `ae doctor`. It checks node, ffmpeg, the AE
   "Allow Scripts to Write Files and Access Network" pref and the macOS Automation permission, and prints the fix.
-- Requirements: AE running, node, ffmpeg/ffprobe (for sheets and video tools).
+- Requirements: AE running, node 22+, ffmpeg/ffprobe (for sheets and video tools).
 
 The user works in this AE project. Read with `dump`/`tree`/`snap` before changing anything, keep edits in `AE.run`
 (one undo step each), and never save unless asked.
@@ -49,7 +49,7 @@ AE.run("Retime intro", function (log) {          // one Cmd+Z step, dialogs supp
 
 ```
 ae run script.jsx [--log file] [--ro|--undo] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
-ae check script.jsx                                          # syntax + ExtendScript lint only
+ae check script.jsx [more.jsx ...]                           # syntax + ExtendScript lint only (no AE needed)
 ae eval 'AE.comp("Logo").numLayers' [--ro]                   # expression -> value is logged
 ae eval 'var c=AE.comp("Logo"); log(c.duration);' --ro       # statements -> use log()
 ae dump "Main" [--depth 1] [--layer "Title"] [--no-keys] [--max-keys N] [--raw-text]
@@ -118,7 +118,7 @@ name or numeric id.
 - `AE.copyEase(prop, k|"all", srcProp, srcK)` copies in/out interpolation, temporal ease, and continuous/auto-bezier.
   The ease-array length adapts to the target dimension (e.g. a spatial Position with 1 entry from a Scale with 3).
 - `AE.keys(prop)` returns `[{frame, time, index, value, "in", "out", inEase, outEase}]`. Read the interpolation types as
-  **`k["in"]` / `k["out"]`**, because `k.in` is a syntax error in ExtendScript.
+  **`k["in"]` / `k["out"]`**: `k.in` works in AE 2026 but is a syntax error in older versions.
 - `AE.set(prop, value)` is a `setValue` that pads missing dimensions (z) and throws clearly if the property is keyed.
 
 **Footage placement**
@@ -188,13 +188,18 @@ name or numeric id.
     contents, a reference you kept to the first group throws "Object is invalid". Re-fetch groups by name
     (`root.property("Lid")`) after the last `addProperty`.
 
-ExtendScript is ES3, and the CLI lint enforces it:
-- Hard errors: `let`/`const`, `=>`, template literals, `class`, spread, `for...of`, `**`, `?.`/`??`, and reserved
-  words used as properties or bare keys (`o.in`, `{in:1}`). These would raise a blocking modal dialog in AE.
-- Warnings: `[].forEach/map/filter/indexOf`, `"".trim`, `Object.keys` and `Array.isArray` don't exist.
-  (`JSON` exists in this environment.)
-- Also flagged: `app.project.save/close`.
-- The lint strips strings, comments and regex literals first, but it can still give a false positive.
+ExtendScript is ES3. `ae run`, `ae eval` and `ae check` parse every script first and refuse to send one AE would reject
+(a syntax error in AE opens a blocking modal dialog). With the Claude Code plugin, every `.jsx` you write or edit is
+checked right away by a hook; otherwise run `ae check file.jsx` yourself. The rules match AE 2026 (verified in AE):
+- Errors: `let`, `=>`, template literals, `class`, spread/rest, destructuring, default parameters, `for...of`, `**`,
+  `?.`, `??`, getters/setters, shorthand/computed/method properties, `async`/generators, regex flags other than `gim`,
+  `const` in a `for (...)` header, future reserved words as names (`short`, `int`, `static`, `char`, `native`, ...),
+  reserved words as unquoted object keys (`{in: 1}`: write `{"in": 1}`), `app.executeCommand`, and **unknown `AE.*`
+  members** (`AE.setTxt` gets "did you mean AE.setText?").
+- Warnings (they fail at runtime): `[].forEach/map/filter/...`, `[].indexOf`, `"".trim/startsWith/...`, `.bind`,
+  `Object.keys` & co, `Array.isArray`, and **`JSON`, which is undefined** (use `AE.str(v)`). Also `const` (reassignment is
+  silently ignored), `app.project.save/close`, and reserved words after a dot (`o.in` works in AE 2026, not in older versions).
+- Fine: trailing commas, `o["in"]`, `let`/`yield` as plain names, `Date.now`.
 
 AE's `Folder.temp` is `.../T/TemporaryItems/`, and a sandboxed shell may be unable to read it. Write files the shell
 must read to `AE.tmp`, or to a path you pass in.

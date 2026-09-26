@@ -14,8 +14,10 @@ ae snap "Main" 0-120:30 --sheet           # render frames to PNG + a labelled co
 
 - **Nothing to install inside AE.** No CEP panel, no bridge to keep open. Scripts go through `osascript` to
   `DoScriptFile`, so AE only has to be running.
-- **Lint before AE sees the script.** ExtendScript is ES3. A stray `let`, `=>` or `o.in` opens a modal error dialog
-  that blocks AE until someone clicks it. `ae run` checks syntax and ES3 rules first and refuses to send a broken script.
+- **Lint before AE sees the script.** ExtendScript is ES3. A stray `let`, `=>` or `{in: 1}` opens a modal error
+  dialog that blocks AE until someone clicks it. `ae run` parses the script against the rules of the real engine
+  (checked in AE 2026), catches typos like `AE.setTxt` ("did you mean AE.setText?"), and refuses to send a broken
+  script. As a Claude Code plugin it also lints every `.jsx` the agent writes, right after it is written.
 - **Safe edits.** Every run is one Cmd+Z step, with dialogs suppressed and errors caught. Errors are reported with the
   line in *your* file.
 - **Visual feedback.** `ae snap` renders frames to PNG and waits until the files are complete. `--sheet` tiles them
@@ -26,7 +28,7 @@ ae snap "Main" 0-120:30 --sheet           # render frames to PNG + a labelled co
 
 ## Install
 
-Requirements: macOS, After Effects (tested with 2026), node 12+, ffmpeg (`brew install ffmpeg`) for the image and video tools.
+Requirements: macOS, After Effects (tested with 2026), node 22+, ffmpeg (`brew install ffmpeg`) for the image and video tools.
 
 **As a Claude Code plugin** (the agent also gets the full API reference as a skill):
 
@@ -39,6 +41,12 @@ Requirements: macOS, After Effects (tested with 2026), node 12+, ffmpeg (`brew i
 
 ```sh
 npm install -g aectl
+```
+
+To get the lint hook without the plugin, add this to `~/.claude/settings.json`:
+
+```json
+{ "hooks": { "PostToolUse": [ { "matcher": "Write|Edit|MultiEdit", "hooks": [ { "type": "command", "command": "ae hook" } ] } ] } }
 ```
 
 Install it once instead of calling it through `npx`: an agent makes many calls, and `npx` resolves the package on every one.
@@ -91,7 +99,7 @@ full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent h
 |---|---|
 | `ae run script.jsx` | lint, run as one undo step, print the log, wait for PNGs; exit 1 on `ERR` |
 | `ae eval 'js'` | run a one-liner; an expression's value is printed |
-| `ae check script.jsx` | syntax + ES3 lint only |
+| `ae check script.jsx` | syntax + ExtendScript lint only, no AE needed |
 | `ae tree` / `ae dump "Comp"` | project overview / one comp in detail (read-only) |
 | `ae snap "Comp" 0-90:15 --sheet` | render frames to PNG, optionally as a contact sheet |
 | `ae sheet out.png a.png b.png` | contact sheet from any images |
@@ -107,6 +115,11 @@ Exit codes: 0 ok, 1 the script logged `ERR`, 2 usage or lint error, 3 AE not run
 - macOS only: the transport is AppleScript. Windows would need `AfterFX.exe -r` and a port of the CLI.
 - Tested on After Effects 2026 (26.x). Older versions probably work, but some pitfalls are version-specific.
 - AE runs one script at a time, and a modal dialog in AE blocks everything until it is closed.
+
+## Development
+
+The CLI is TypeScript in `src/`, bundled into `dist/ae.mjs`. `npm install && npm run check` type-checks, runs the
+tests (vitest) and verifies that the committed `dist/` is up to date. See [AGENTS.md](AGENTS.md).
 
 ## License
 

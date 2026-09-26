@@ -1,0 +1,75 @@
+// ae dump / tree / snap: read-only views of the project
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { int, parseArgs, str } from "../args.ts";
+import { WORK } from "../env.ts";
+import { makeSheet } from "../media.ts";
+import { readLog, runSnippet } from "../runner.ts";
+import { abspath, die, jsstr, out } from "../util.ts";
+
+export async function cmdDump(argv: string[]): Promise<number> {
+  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys"], ["--no-keys", "--raw-text"]);
+  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]');
+  const comp = p.pos[p.pos.length - 1];
+  const layer = str(p, "--layer");
+  const raw = !!p.opts["--raw-text"];
+  const code =
+    `log(AE.dump(AE.comp(${jsstr(comp)}), {depth: ${int(p, "--depth", 0)}, keys: ${!p.opts["--no-keys"]}, ` +
+    `maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}}));\n`;
+  // --raw-text toggles text expressions off/on to read the source text: one undo step "ae dump"
+  return (await runSnippet("dump", "dump", code, { undo: raw, label: "ae dump" })).code;
+}
+
+export async function cmdTree(argv: string[]): Promise<number> {
+  const main = argv[0] === "--main" && argv[1] !== undefined ? jsstr(argv[1]) : "null";
+  return (await runSnippet("tree", "tree", `log(AE.tree(${main}));\n`, { undo: false, label: "ae tree" })).code;
+}
+
+/** "8,44,90" / "10-100:10" / "0-20" -> [8, 44, 90] */
+export function parseFrames(spec: string): number[] {
+  const res: number[] = [];
+  const bad = () => die(`bad frame list '${spec}' (use 8,44,90 or 10-100:10)`);
+  for (const part of spec.split(",")) {
+    const range = /^(\d+)-(\d+)(?::(\d+))?$/.exec(part);
+    if (range) {
+      const step = range[3] === undefined ? 1 : +range[3];
+      if (step <= 0) die(`bad step in '${part}'`);
+      for (let f = +range[1]; f <= +range[2]; f += step) res.push(f);
+    } else if (/^\d+(\.\d+)?$/.test(part)) {
+      res.push(+part);
+    } else {
+      bad();
+    }
+  }
+  if (!res.length) bad();
+  return res;
+}
+
+export async function cmdSnap(argv: string[]): Promise<number> {
+  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout"], ["--sheet"]);
+  const [comp, spec] = p.pos;
+  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols N] [--width px]');
+  const res = str(p, "--res", "half");
+  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
+  const frames = parseFrames(spec);
+  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
+  const dir = abspath(str(p, "--out") || path.join(WORK, "snap", prefix));
+  mkdirSync(dir, { recursive: true });
+  const code = `AE.snap(AE.comp(${jsstr(comp)}), [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});\n`;
+  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout: p.opts["--timeout"] ? Number(p.opts["--timeout"]) : undefined });
+  if (r.code) return r.code;
+  const cells: { label: string; file: string }[] = [];
+  for (const line of readLog(r.log).split("\n")) {
+    if (!line.startsWith("PNG ")) continue;
+    const file = line.slice(4);
+    out(file);
+    const m = /_f(\d+)\.png$/.exec(file);
+    cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
+  }
+  if (p.opts["--sheet"] && cells.length) {
+    const sheet = path.join(dir, prefix + "_sheet.png");
+    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), cells);
+    out("SHEET " + sheet);
+  }
+  return 0;
+}

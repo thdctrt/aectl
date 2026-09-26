@@ -8,6 +8,7 @@
   },
   "files": [
     "ae",
+    "dist/",
     "lib.jsx",
     "tests/",
     "skills/",
@@ -15,16 +16,41 @@
     "README.md",
     "LICENSE"
   ],
-  "os": ["darwin"],
-  "engines": {
-    "node": ">=12"
+  "scripts": {
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/ae.mjs --legal-comments=none \"--banner:js=// Generated from src/ by npm run build. Do not edit.\"",
+    "typecheck": "tsc -p .",
+    "test": "npm run build --silent && vitest run",
+    "check": "npm run typecheck && npm test && git diff --exit-code dist/"
   },
-  "keywords": ["after-effects", "extendscript", "jsx", "adobe", "cli", "motion-graphics", "claude-code", "ai-agent"],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "after-effects",
+    "extendscript",
+    "jsx",
+    "adobe",
+    "cli",
+    "motion-graphics",
+    "claude-code",
+    "ai-agent"
+  ],
   "author": "thdctrt",
   "license": "MIT",
   "homepage": "https://github.com/thdctrt/aectl",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thdctrt/aectl.git"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "acorn": "^8.18.0",
+    "acorn-walk": "^8.3.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
   }
 }
