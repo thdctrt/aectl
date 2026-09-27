@@ -60,9 +60,11 @@ ae sheet out.png a.png b.png ... [--cols 4] [--width 640]    # contact sheet fro
 ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]  # pick clip times
 ae probe video.mp4 [--fps 25]                                # size, fps (avg + r; flags VFR), duration, frames, audio;
                                                              # --fps: length in comp frames at that rate
+ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 40 checks in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 42 checks in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -76,6 +78,27 @@ ae selftest [--keep]                                         # 40 checks in a th
   disk to `<project dir>/Backups/<name>-YYYYmmdd-HHMMSS.aep`. `--as` saves to a new path, and AE keeps working on that
   new file afterwards, like Save As. Only save when the user asks you to: they may prefer to save themselves.
 - The combined file that actually ran is at `$TMPDIR/ae-tools/run/<name>.combined.jsx`.
+- `export`: AE renders a master (ProRes 422 HQ or Lossless; with alpha for alpha presets) through the render queue,
+  then ffmpeg encodes the preset. Default range: the comp's work area. Default file: `./<comp>_<preset>.<ext>`; an
+  existing file needs `--force`. AE is busy until its render finishes. Prints `EXPORT <path>` and a probe line
+  (size, fps, length, codec, alpha, audio): check it matches what the user asked for. Map requests to presets:
+
+  | the user says | preset |
+  |---|---|
+  | YouTube, Vimeo, "1080", Full HD | `youtube-1080` (default) |
+  | 4K, UHD | `youtube-4k` |
+  | Shorts, Reels, TikTok, vertical, stories | `shorts` (1080x1920) |
+  | square, Instagram feed | `square` (1080x1080) |
+  | for a website, docs, a chat, small | `web` (H.264, at most 1280 wide) |
+  | master, for editing, for the client, ProRes | `prores` |
+  | transparent, with alpha, for compositing | `prores-alpha` |
+  | transparent video for web / UI | `webm-alpha` |
+  | GIF | `gif` |
+
+  When the comp's aspect differs from the preset, it is letterboxed (`--fit crop` fills the frame instead) and a note
+  goes to stderr: tell the user. `--ame` hands the comp to Adobe Media Encoder with AE's H.264 template at the comp
+  size (the preset's size is not applied), needs a saved project, and returns right away (`--wait` waits for the file).
+  Lottie is not supported yet.
 
 ## API (`lib.jsx`)
 
@@ -149,6 +172,9 @@ name or numeric id.
 - `AE.tree(mainName?)` is the project overview used by `ae tree`.
 - `AE.snap(comp, frames[], outDir?, prefix?, res?)` queues PNGs, logs `PNG <path>` and returns the paths.
   `res` is `"full"|"half"|"third"|"quarter"`, 1–4, `[x,y]`, or null (keep).
+- `AE.render(comp, path, {kind, full, from, to, ame})` renders through the render queue and returns the file:
+  `kind` is `"master"` (ProRes 422 HQ/Lossless, default), `"alpha"` or `"h264"`; the range defaults to the work area
+  (`from`/`to` are comp frames, inclusive). Logs `RENDERED <path>`. Blocks AE until done. `ae export` is built on it.
 - `AE.scriptPath` / `AE.scriptDir` hold the original script location under `ae run`. `AE.tmp` is the shell-readable work dir.
 
 ## Pitfalls (all handled by the lib/CLI; keep them in mind for raw code)
@@ -171,8 +197,7 @@ name or numeric id.
 7. **`saveFrameToPng` is async**. The files appear after the script returns. The shell side waits until each PNG ends
    with the `IEND` chunk (timeout 60 s). `resolutionFactor` is taken at call time, so the lib sets it, queues the renders
    and restores the comp's *original* value right away.
-8. **zsh globs**: `rm s*.png` with no match aborts `&&` chains. The CLI is bash with `nullglob` and deletes by exact
-   path. In your own shell commands, use `find ... -delete` or `rm -f` with explicit names.
+8. **zsh globs**: `rm s*.png` with no match aborts `&&` chains. The CLI deletes by exact path. In your own shell commands, use `find ... -delete` or `rm -f` with explicit names.
 9. **Keyframe ease**: new keys get default interpolation. `AE.key(..., {like:[ref,k]})` or `AE.copyEase` copy it.
    `setTemporalEaseAtKey` needs arrays whose length matches the property's ease dimension: 1 for spatial or 1-D
    properties, 2 or 3 for Scale-like ones. The lib reads the target key's own length and adapts.
@@ -187,6 +212,8 @@ name or numeric id.
 14. **Shape contents: `addProperty` invalidates sibling references**. After adding a second group to a shape layer's
     contents, a reference you kept to the first group throws "Object is invalid". Re-fetch groups by name
     (`root.property("Lid")`) after the last `addProperty`.
+15. **`renderQueue.render()` and `queueInAME()` process the whole queue**, including items the user queued for later.
+    `AE.render` switches those off for the duration, restores them, and removes its own item.
 
 ExtendScript is ES3. `ae run`, `ae eval` and `ae check` parse every script first and refuse to send one AE would reject
 (a syntax error in AE opens a blocking modal dialog). With the Claude Code plugin, every `.jsx` you write or edit is

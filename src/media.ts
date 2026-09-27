@@ -45,11 +45,12 @@ export interface VideoInfo {
   avgFrameRate: string;
   nbFrames: string;
   codec: string;
+  pixFmt: string;
   duration: string;
 }
 
 export function probeVideo(file: string): VideoInfo {
-  const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name:format=duration", "-of", "default=nw=1", file]);
+  const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name,pix_fmt:format=duration", "-of", "default=nw=1", file]);
   const v: Record<string, string> = {};
   for (const l of r.stdout.split("\n")) {
     const i = l.indexOf("=");
@@ -62,6 +63,7 @@ export function probeVideo(file: string): VideoInfo {
     avgFrameRate: v.avg_frame_rate ?? "",
     nbFrames: v.nb_frames ?? "",
     codec: v.codec_name ?? "",
+    pixFmt: v.pix_fmt ?? "",
     duration: v.duration ?? "",
   };
 }
@@ -70,4 +72,8 @@ export function probeVideo(file: string): VideoInfo {
 export function rate(r: string): number {
   const [a, b] = r.split("/").map(Number);
   return b > 0 ? a / b : NaN;
+}
+
+export function hasAudio(file: string): boolean {
+  return run("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file]).stdout.trim() !== "";
 }

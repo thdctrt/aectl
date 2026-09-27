@@ -840,5 +840,74 @@ var AE = (function () {
         return paths;
     };
 
+    // ------------------------------------------------------------------ render
+    // Output module templates to look for, best first, per kind of file.
+    var RENDER_TEMPLATES = {
+        master: [/ProRes 422 HQ/i, /^Lossless$/i, /Lossless/i],
+        alpha: [/ProRes 4444.*Alpha/i, /Lossless with Alpha/i, /Alpha/i],
+        h264: [/^H\.264/i, /H\.264/i]
+    };
+    // Render `comp` to `path` through the render queue without disturbing the user's queue: items already queued are
+    // switched off for the duration and switched back on afterwards, and the added item is removed again.
+    //   o.kind: "master" (ProRes 422 HQ or Lossless, default) | "alpha" (with alpha channel) | "h264"
+    //   o.full: whole comp; o.from/o.to: comp frames, both inclusive; default: the work area
+    //   o.ame: hand the item to Media Encoder (queueInAME) instead of rendering in AE; needs a saved project
+    // render() blocks AE until the file is written. Logs "RENDERED <path>" (or "AME <path>"). Returns the path.
+    A.render = function (comp, path, o) {
+        comp = A.comp(comp);
+        o = o || {};
+        var kind = o.kind || "master", wanted = RENDER_TEMPLATES[kind];
+        if (!wanted) { throw new Error("render: unknown kind '" + kind + "' (master, alpha, h264)"); }
+        if (o.ame && !app.project.file) { throw new Error("render: Media Encoder reads the project from disk; save it first"); }
+        if (o.ame && !app.project.renderQueue.canQueueInAME) { throw new Error("render: Media Encoder is not available"); }
+        var fd = comp.frameDuration, start, dur;
+        if (o.from !== undefined || o.to !== undefined) {
+            var fromF = o.from !== undefined ? o.from : 0, toF = o.to !== undefined ? o.to : Math.round(comp.duration / fd) - 1;
+            if (toF < fromF) { throw new Error("render: to (" + toF + ") is before from (" + fromF + ")"); }
+            start = fromF * fd; dur = Math.min((toF - fromF + 1) * fd, comp.duration - start);
+        } else if (o.full) {
+            start = 0; dur = comp.duration;
+        } else {
+            start = comp.workAreaStart; dur = comp.workAreaDuration;
+        }
+        if (dur <= 0) { throw new Error("render: empty time span"); }
+
+        var rq = app.project.renderQueue, paused = [], item = null, i, out;
+        for (i = 1; i <= rq.numItems; i++) {
+            if (rq.item(i).status === RQItemStatus.QUEUED) { paused.push(rq.item(i)); rq.item(i).render = false; }
+        }
+        try {
+            item = rq.items.add(comp);
+            item.timeSpanStart = start;
+            item.timeSpanDuration = dur;
+            for (i = 0; i < item.templates.length; i++) {
+                if (item.templates[i] === "Best Settings") { item.applyTemplate("Best Settings"); break; }
+            }
+            var om = item.outputModule(1), names = om.templates, pick = null;
+            for (var w = 0; w < wanted.length && pick === null; w++) {
+                for (i = 0; i < names.length; i++) { if (wanted[w].test(names[i])) { pick = names[i]; break; } }
+            }
+            if (pick === null) { throw new Error("render: no output module template for '" + kind + "'; available: " + names.join(", ")); }
+            om.applyTemplate(pick);
+            A._buf.push("TEMPLATE " + pick);
+            var f = new File(path);
+            if (f.parent && !f.parent.exists) { f.parent.create(); }
+            if (f.exists) { f.remove(); }
+            om.file = f;
+            out = om.file.fsName;   // AE may adjust the extension to the format
+            if (o.ame) {
+                rq.queueInAME(true);
+                A._buf.push("AME " + out);
+            } else {
+                rq.render();
+                A._buf.push("RENDERED " + out);
+            }
+        } finally {
+            if (item) { try { item.remove(); } catch (e) { } }
+            for (i = 0; i < paused.length; i++) { try { paused[i].render = true; } catch (e2) { } }
+        }
+        return out;
+    };
+
     return A;
 })();

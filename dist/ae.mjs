@@ -1,7 +1,7 @@
 // Generated from src/ by npm run build. Do not edit.
 
-// src/commands/inspect.ts
-import { mkdirSync as mkdirSync3 } from "node:fs";
+// src/commands/export.ts
+import { readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import path6 from "node:path";
 
 // src/util.ts
@@ -191,7 +191,7 @@ function makeSheet(outFile, cols, cellWidth, cells) {
   if (r.status !== 0) die(`ffmpeg failed building ${outFile}`);
 }
 function probeVideo(file) {
-  const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name:format=duration", "-of", "default=nw=1", file]);
+  const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name,pix_fmt:format=duration", "-of", "default=nw=1", file]);
   const v = {};
   for (const l of r.stdout.split("\n")) {
     const i2 = l.indexOf("=");
@@ -204,6 +204,7 @@ function probeVideo(file) {
     avgFrameRate: v.avg_frame_rate ?? "",
     nbFrames: v.nb_frames ?? "",
     codec: v.codec_name ?? "",
+    pixFmt: v.pix_fmt ?? "",
     duration: v.duration ?? ""
   };
 }
@@ -211,12 +212,113 @@ function rate(r) {
   const [a, b] = r.split("/").map(Number);
   return b > 0 ? a / b : NaN;
 }
+function hasAudio(file) {
+  return run("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file]).stdout.trim() !== "";
+}
+
+// src/presets.ts
+var H264 = ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p"];
+var AAC = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"];
+var FASTSTART = ["-movflags", "+faststart"];
+var PRESETS = [
+  { name: "youtube-1080", use: "YouTube / Vimeo, Full HD", ext: "mp4", width: 1920, height: 1080, video: H264, audio: AAC, container: FASTSTART },
+  { name: "youtube-4k", use: "YouTube / Vimeo, 4K UHD", ext: "mp4", width: 3840, height: 2160, video: H264, audio: AAC, container: FASTSTART },
+  { name: "shorts", aliases: ["reels", "tiktok"], use: "YouTube Shorts, Instagram Reels, TikTok (vertical 9:16)", ext: "mp4", width: 1080, height: 1920, video: H264, audio: AAC, container: FASTSTART },
+  { name: "square", use: "Instagram / social feed, 1:1", ext: "mp4", width: 1080, height: 1080, video: H264, audio: AAC, container: FASTSTART },
+  {
+    name: "web",
+    use: "small H.264 for sites, docs, chats (at most 1280 wide)",
+    ext: "mp4",
+    maxWidth: 1280,
+    video: ["-c:v", "libx264", "-preset", "slow", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p"],
+    audio: ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"],
+    container: FASTSTART
+  },
+  {
+    name: "prores",
+    use: "master for editing / delivery: ProRes 422 HQ at comp size",
+    ext: "mov",
+    video: ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le", "-vendor", "apl0"],
+    audio: ["-c:a", "pcm_s16le"]
+  },
+  {
+    name: "prores-alpha",
+    use: "master with transparency: ProRes 4444 + alpha at comp size",
+    ext: "mov",
+    alpha: true,
+    video: ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "apl0"],
+    audio: ["-c:a", "pcm_s16le"]
+  },
+  {
+    name: "webm-alpha",
+    use: "transparent video for web / UI: VP9 + alpha",
+    ext: "webm",
+    alpha: true,
+    video: ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30", "-b:v", "0", "-row-mt", "1"],
+    audio: ["-c:a", "libopus", "-b:a", "128k"]
+  },
+  { name: "gif", use: "animated GIF, 15 fps, at most 640 wide", ext: "gif", maxWidth: 640, fps: 15, gif: true, video: [], audio: null }
+];
+function findPreset(name) {
+  const n = name.toLowerCase();
+  return PRESETS.find((p) => p.name === n || p.aliases?.includes(n));
+}
+function presetNames() {
+  return PRESETS.flatMap((p) => [p.name, ...p.aliases ?? []]);
+}
+function listPresets() {
+  const w = Math.max(...PRESETS.map((p) => p.name.length));
+  return PRESETS.map((p) => {
+    const size = p.width ? `${p.width}x${p.height}` : p.maxWidth ? `<=${p.maxWidth}w` : "comp size";
+    const also = p.aliases ? `  (also: ${p.aliases.join(", ")})` : "";
+    return `${p.name.padEnd(w)}  ${size.padEnd(9)}  .${p.ext.padEnd(4)}  ${p.use}${also}`;
+  }).join("\n");
+}
+function aspectMismatch(p, inW, inH) {
+  if (!p.width || !p.height) return false;
+  return Math.abs(inW / inH - p.width / p.height) > 5e-3;
+}
+function videoFilter(p, inW, inH, fit) {
+  const f = [];
+  if (p.fps) f.push(`fps=${p.fps}`);
+  if (p.width && p.height) {
+    const W = p.width;
+    const H = p.height;
+    if (!aspectMismatch(p, inW, inH)) f.push(`scale=${W}:${H}:flags=lanczos`);
+    else if (fit === "crop") f.push(`scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos`, `crop=${W}:${H}`);
+    else f.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos`, `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black`);
+  } else if (p.maxWidth && inW > p.maxWidth) {
+    f.push(`scale=${p.maxWidth}:-2:flags=lanczos`);
+  } else {
+    f.push("scale=trunc(iw/2)*2:trunc(ih/2)*2");
+  }
+  f.push("setsar=1");
+  if (p.gif) return f.join(",") + ",split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5";
+  return f.join(",");
+}
+function ffmpegArgs(p, input, output, o) {
+  const audio = o.hasAudio && p.audio ? p.audio : ["-an"];
+  return [
+    "-v",
+    "error",
+    ...o.stats ? ["-stats"] : [],
+    "-y",
+    "-i",
+    input,
+    "-vf",
+    videoFilter(p, o.inW, o.inH, o.fit),
+    ...p.video,
+    ...audio,
+    ...p.container ?? [],
+    output
+  ];
+}
 
 // src/runner.ts
 import { closeSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readSync, rmSync, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import path5 from "node:path";
 
-// node_modules/acorn/dist/acorn.mjs
+// node_modules/.pnpm/acorn@8.18.0/node_modules/acorn/dist/acorn.mjs
 var astralIdentifierCodes = [509, 0, 227, 0, 150, 4, 294, 9, 1368, 2, 2, 1, 6, 3, 41, 2, 5, 0, 166, 1, 574, 3, 9, 9, 7, 9, 32, 4, 318, 1, 78, 5, 71, 10, 50, 3, 123, 2, 54, 14, 32, 10, 3, 1, 11, 3, 46, 10, 8, 0, 46, 9, 7, 2, 37, 13, 2, 9, 6, 1, 45, 0, 13, 2, 49, 13, 9, 3, 2, 11, 83, 11, 7, 0, 3, 0, 158, 11, 6, 9, 7, 3, 56, 1, 2, 6, 3, 1, 3, 2, 10, 0, 11, 1, 3, 6, 4, 4, 68, 8, 2, 0, 3, 0, 2, 3, 2, 4, 2, 0, 15, 1, 83, 17, 10, 9, 5, 0, 82, 19, 13, 9, 214, 6, 3, 8, 28, 1, 83, 16, 16, 9, 82, 12, 9, 9, 7, 19, 58, 14, 5, 9, 243, 14, 166, 9, 71, 5, 2, 1, 3, 3, 2, 0, 2, 1, 13, 9, 120, 6, 3, 6, 4, 0, 29, 9, 41, 6, 2, 3, 9, 0, 10, 10, 47, 15, 199, 7, 137, 9, 54, 7, 2, 7, 17, 9, 57, 21, 2, 13, 123, 5, 4, 0, 2, 1, 2, 6, 2, 0, 9, 9, 49, 4, 2, 1, 2, 4, 9, 9, 55, 9, 266, 3, 10, 1, 2, 0, 49, 6, 4, 4, 14, 10, 5350, 0, 7, 14, 11465, 27, 2343, 9, 87, 9, 39, 4, 60, 6, 26, 9, 535, 9, 470, 0, 2, 54, 8, 3, 82, 0, 12, 1, 19628, 1, 4178, 9, 519, 45, 3, 22, 543, 4, 4, 5, 9, 7, 3, 6, 31, 3, 149, 2, 1418, 49, 513, 54, 5, 49, 9, 0, 15, 0, 23, 4, 2, 14, 1361, 6, 2, 16, 3, 6, 2, 1, 2, 4, 101, 0, 161, 6, 10, 9, 357, 0, 62, 13, 499, 13, 245, 1, 2, 9, 233, 0, 3, 0, 8, 1, 6, 0, 475, 6, 110, 6, 6, 9, 4759, 9, 787719, 239];
 var astralIdentifierStartCodes = [0, 11, 2, 25, 2, 18, 2, 1, 2, 14, 3, 13, 35, 122, 70, 52, 268, 28, 4, 48, 48, 31, 14, 29, 6, 37, 11, 29, 3, 35, 5, 7, 2, 4, 43, 157, 19, 35, 5, 35, 5, 39, 9, 51, 13, 10, 2, 14, 2, 6, 2, 1, 2, 10, 2, 14, 2, 6, 2, 1, 4, 51, 13, 310, 10, 21, 11, 7, 25, 5, 2, 41, 2, 8, 70, 5, 3, 0, 2, 43, 2, 1, 4, 0, 3, 22, 11, 22, 10, 30, 66, 18, 2, 1, 11, 21, 11, 25, 7, 25, 39, 55, 7, 1, 65, 0, 16, 3, 2, 2, 2, 28, 43, 28, 4, 28, 36, 7, 2, 27, 28, 53, 11, 21, 11, 18, 14, 17, 111, 72, 56, 50, 14, 50, 14, 35, 39, 27, 10, 22, 251, 41, 7, 1, 17, 5, 57, 28, 11, 0, 9, 21, 43, 17, 47, 20, 28, 22, 13, 52, 58, 1, 3, 0, 14, 44, 33, 24, 27, 35, 30, 0, 3, 0, 9, 34, 4, 0, 13, 47, 15, 3, 22, 0, 2, 0, 36, 17, 2, 24, 20, 1, 64, 6, 2, 0, 2, 3, 2, 14, 2, 9, 8, 46, 39, 7, 3, 1, 3, 21, 2, 6, 2, 1, 2, 4, 4, 0, 19, 0, 13, 4, 31, 9, 2, 0, 3, 0, 2, 37, 2, 0, 26, 0, 2, 0, 45, 52, 19, 3, 21, 2, 31, 47, 21, 1, 2, 0, 185, 46, 42, 3, 37, 47, 21, 0, 60, 42, 14, 0, 72, 26, 38, 6, 186, 43, 117, 63, 32, 7, 3, 0, 3, 7, 2, 1, 2, 23, 16, 0, 2, 0, 95, 7, 3, 38, 17, 0, 2, 0, 29, 0, 11, 39, 8, 0, 22, 0, 12, 45, 20, 0, 19, 72, 200, 32, 32, 8, 2, 36, 18, 0, 50, 29, 113, 6, 2, 1, 2, 37, 22, 0, 26, 5, 2, 1, 2, 31, 15, 0, 24, 43, 261, 18, 16, 0, 2, 12, 2, 33, 125, 0, 80, 921, 103, 110, 18, 195, 2637, 96, 16, 1071, 18, 5, 26, 3994, 6, 582, 6842, 29, 1763, 568, 8, 30, 18, 78, 18, 29, 19, 47, 17, 3, 32, 20, 6, 18, 433, 44, 212, 63, 33, 24, 3, 24, 45, 74, 6, 0, 67, 12, 65, 1, 2, 0, 15, 4, 10, 7381, 42, 31, 98, 114, 8702, 3, 2, 6, 2, 1, 2, 290, 16, 0, 30, 2, 3, 0, 15, 3, 9, 395, 2309, 106, 6, 12, 4, 8, 8, 9, 5991, 84, 2, 70, 2, 1, 3, 0, 3, 1, 3, 3, 2, 11, 2, 0, 2, 6, 2, 64, 2, 3, 3, 7, 2, 6, 2, 27, 2, 3, 2, 4, 2, 0, 4, 6, 2, 339, 3, 24, 2, 24, 2, 30, 2, 24, 2, 30, 2, 24, 2, 30, 2, 24, 2, 30, 2, 24, 2, 7, 1845, 30, 7, 5, 262, 61, 147, 44, 11, 6, 17, 0, 322, 29, 19, 43, 485, 27, 229, 29, 3, 0, 208, 30, 2, 2, 2, 1, 2, 6, 3, 4, 10, 1, 225, 6, 2, 3, 2, 1, 2, 14, 2, 196, 60, 67, 8, 0, 1205, 3, 2, 26, 2, 1, 2, 0, 3, 0, 2, 9, 2, 3, 2, 0, 2, 0, 7, 0, 5, 0, 2, 0, 2, 0, 2, 2, 2, 1, 2, 0, 3, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 1, 2, 0, 3, 3, 2, 6, 2, 3, 2, 3, 2, 0, 2, 9, 2, 16, 6, 2, 2, 4, 2, 16, 4421, 42719, 33, 4381, 3, 5773, 3, 7472, 16, 621, 2467, 541, 1507, 4938, 6, 8489];
 var nonASCIIidentifierChars = "\u200C\u200D\xB7\u0300-\u036F\u0387\u0483-\u0487\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7\u0610-\u061A\u064B-\u0669\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED\u06F0-\u06F9\u0711\u0730-\u074A\u07A6-\u07B0\u07C0-\u07C9\u07EB-\u07F3\u07FD\u0816-\u0819\u081B-\u0823\u0825-\u0827\u0829-\u082D\u0859-\u085B\u0897-\u089F\u08CA-\u08E1\u08E3-\u0903\u093A-\u093C\u093E-\u094F\u0951-\u0957\u0962\u0963\u0966-\u096F\u0981-\u0983\u09BC\u09BE-\u09C4\u09C7\u09C8\u09CB-\u09CD\u09D7\u09E2\u09E3\u09E6-\u09EF\u09FE\u0A01-\u0A03\u0A3C\u0A3E-\u0A42\u0A47\u0A48\u0A4B-\u0A4D\u0A51\u0A66-\u0A71\u0A75\u0A81-\u0A83\u0ABC\u0ABE-\u0AC5\u0AC7-\u0AC9\u0ACB-\u0ACD\u0AE2\u0AE3\u0AE6-\u0AEF\u0AFA-\u0AFF\u0B01-\u0B03\u0B3C\u0B3E-\u0B44\u0B47\u0B48\u0B4B-\u0B4D\u0B55-\u0B57\u0B62\u0B63\u0B66-\u0B6F\u0B82\u0BBE-\u0BC2\u0BC6-\u0BC8\u0BCA-\u0BCD\u0BD7\u0BE6-\u0BEF\u0C00-\u0C04\u0C3C\u0C3E-\u0C44\u0C46-\u0C48\u0C4A-\u0C4D\u0C55\u0C56\u0C62\u0C63\u0C66-\u0C6F\u0C81-\u0C83\u0CBC\u0CBE-\u0CC4\u0CC6-\u0CC8\u0CCA-\u0CCD\u0CD5\u0CD6\u0CE2\u0CE3\u0CE6-\u0CEF\u0CF3\u0D00-\u0D03\u0D3B\u0D3C\u0D3E-\u0D44\u0D46-\u0D48\u0D4A-\u0D4D\u0D57\u0D62\u0D63\u0D66-\u0D6F\u0D81-\u0D83\u0DCA\u0DCF-\u0DD4\u0DD6\u0DD8-\u0DDF\u0DE6-\u0DEF\u0DF2\u0DF3\u0E31\u0E34-\u0E3A\u0E47-\u0E4E\u0E50-\u0E59\u0EB1\u0EB4-\u0EBC\u0EC8-\u0ECE\u0ED0-\u0ED9\u0F18\u0F19\u0F20-\u0F29\u0F35\u0F37\u0F39\u0F3E\u0F3F\u0F71-\u0F84\u0F86\u0F87\u0F8D-\u0F97\u0F99-\u0FBC\u0FC6\u102B-\u103E\u1040-\u1049\u1056-\u1059\u105E-\u1060\u1062-\u1064\u1067-\u106D\u1071-\u1074\u1082-\u108D\u108F-\u109D\u135D-\u135F\u1369-\u1371\u1712-\u1715\u1732-\u1734\u1752\u1753\u1772\u1773\u17B4-\u17D3\u17DD\u17E0-\u17E9\u180B-\u180D\u180F-\u1819\u18A9\u1920-\u192B\u1930-\u193B\u1946-\u194F\u19D0-\u19DA\u1A17-\u1A1B\u1A55-\u1A5E\u1A60-\u1A7C\u1A7F-\u1A89\u1A90-\u1A99\u1AB0-\u1ABD\u1ABF-\u1ADD\u1AE0-\u1AEB\u1B00-\u1B04\u1B34-\u1B44\u1B50-\u1B59\u1B6B-\u1B73\u1B80-\u1B82\u1BA1-\u1BAD\u1BB0-\u1BB9\u1BE6-\u1BF3\u1C24-\u1C37\u1C40-\u1C49\u1C50-\u1C59\u1CD0-\u1CD2\u1CD4-\u1CE8\u1CED\u1CF4\u1CF7-\u1CF9\u1DC0-\u1DFF\u200C\u200D\u203F\u2040\u2054\u20D0-\u20DC\u20E1\u20E5-\u20F0\u2CEF-\u2CF1\u2D7F\u2DE0-\u2DFF\u302A-\u302F\u3099\u309A\u30FB\uA620-\uA629\uA66F\uA674-\uA67D\uA69E\uA69F\uA6F0\uA6F1\uA802\uA806\uA80B\uA823-\uA827\uA82C\uA880\uA881\uA8B4-\uA8C5\uA8D0-\uA8D9\uA8E0-\uA8F1\uA8FF-\uA909\uA926-\uA92D\uA947-\uA953\uA980-\uA983\uA9B3-\uA9C0\uA9D0-\uA9D9\uA9E5\uA9F0-\uA9F9\uAA29-\uAA36\uAA43\uAA4C\uAA4D\uAA50-\uAA59\uAA7B-\uAA7D\uAAB0\uAAB2-\uAAB4\uAAB7\uAAB8\uAABE\uAABF\uAAC1\uAAEB-\uAAEF\uAAF5\uAAF6\uABE3-\uABEA\uABEC\uABED\uABF0-\uABF9\uFB1E\uFE00-\uFE0F\uFE20-\uFE2F\uFE33\uFE34\uFE4D-\uFE4F\uFF10-\uFF19\uFF3F\uFF65";
@@ -5913,7 +6015,7 @@ function parse3(input, options) {
   return Parser.parse(input, options);
 }
 
-// node_modules/acorn-walk/dist/walk.mjs
+// node_modules/.pnpm/acorn-walk@8.3.5/node_modules/acorn-walk/dist/walk.mjs
 function simple(node, visitors, baseVisitor, state, override) {
   if (!baseVisitor) {
     baseVisitor = base;
@@ -6671,7 +6773,148 @@ function readLog(log) {
   }
 }
 
+// src/commands/export.ts
+var USAGE = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--ame [--wait]]   (presets: ae export --list)';
+var RENDER_TIMEOUT = 3600;
+async function cmdExport(argv) {
+  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list"]);
+  if (p.opts["--list"]) {
+    out(listPresets());
+    return 0;
+  }
+  if (p.pos.length !== 1) die(USAGE);
+  const comp = p.pos[0];
+  const presetName = str(p, "--preset", "youtube-1080");
+  const preset = findPreset(presetName) ?? die(`unknown preset '${presetName}'; one of: ${presetNames().join(", ")}`);
+  const fit = str(p, "--fit", "pad");
+  if (fit !== "pad" && fit !== "crop") die("--fit must be pad or crop");
+  const from = frameOpt(p.opts["--from"], "--from");
+  const to = frameOpt(p.opts["--to"], "--to");
+  if (p.opts["--full"] && (from !== void 0 || to !== void 0)) die("--full and --from/--to exclude each other");
+  if (p.opts["--wait"] && !p.opts["--ame"]) die("--wait only goes with --ame");
+  const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : RENDER_TIMEOUT;
+  if (!(timeout > 0)) die("--timeout must be a number of seconds");
+  const safe = comp.replace(/[^\p{L}\p{N}_-]+/gu, "_");
+  const ext = p.opts["--ame"] ? "mp4" : preset.ext;
+  const target = abspath(str(p, "--out") || `${safe}_${preset.name}.${ext}`);
+  if (exists(target) && !p.opts["--force"]) die(`${target} exists; add --force to overwrite it`);
+  const span = { full: !!p.opts["--full"], from, to };
+  if (p.opts["--ame"]) return exportWithAme(comp, preset, target, span, timeout, !!p.opts["--wait"]);
+  need("ffmpeg");
+  need("ffprobe");
+  const master = path6.join(WORK, "export", `${safe}_${preset.name}_master.mov`);
+  err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
+  const rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  if (typeof rendered === "number") return rendered;
+  err(`ae: encoding ${preset.name}...`);
+  const code = encode(preset, rendered, target, fit, true);
+  if (p.opts["--keep-intermediate"]) err(`ae: master kept: ${rendered}`);
+  else rmSync2(rendered, { force: true });
+  if (code) return code;
+  out("EXPORT " + target);
+  out(describe(target));
+  return 0;
+}
+function frameOpt(v, name) {
+  if (typeof v !== "string") return void 0;
+  if (!/^\d+$/.test(v)) die(`${name} must be a comp frame number, got '${v}'`);
+  return parseInt(v, 10);
+}
+function renderOptsJs(o) {
+  const parts = [`kind: ${jsstr(o.kind)}`];
+  if (o.full) parts.push("full: true");
+  if (o.from !== void 0) parts.push(`from: ${o.from}`);
+  if (o.to !== void 0) parts.push(`to: ${o.to}`);
+  if (o.ame) parts.push("ame: true");
+  return "{" + parts.join(", ") + "}";
+}
+async function renderInAe(comp, file, o, timeout) {
+  const code = `AE.render(AE.comp(${jsstr(comp)}), ${jsstr(file)}, ${renderOptsJs(o)});
+`;
+  const r = await runSnippet("export", "render", code, { undo: true, label: "ae export", quiet: true, timeout });
+  if (r.code) return r.code;
+  const log = readLog(r.log).split("\n");
+  const template = log.find((l) => l.startsWith("TEMPLATE "));
+  if (template) err(`ae: AE output module: ${template.slice(9)}`);
+  const done = log.find((l) => l.startsWith(o.ame ? "AME " : "RENDERED "));
+  const written = done ? done.slice(done.indexOf(" ") + 1) : "";
+  if (!written || !o.ame && !isFile(written)) {
+    err(`ae: AE did not report a rendered file (log: ${r.log})`);
+    return 1;
+  }
+  return written;
+}
+function encode(preset, input, output, fit, stats = false) {
+  const v = probeVideo(input);
+  const inW = Number(v.width);
+  const inH = Number(v.height);
+  if (!(inW > 0 && inH > 0)) {
+    err(`ae: cannot read the rendered master ${input}`);
+    return 1;
+  }
+  if (aspectMismatch(preset, inW, inH)) {
+    err(`ae: ${inW}x${inH} does not match ${preset.name} (${preset.width}x${preset.height}): ` + (fit === "crop" ? "cropped to fill the frame" : "letterboxed; add --fit crop to fill the frame instead"));
+  }
+  const r = run("ffmpeg", ffmpegArgs(preset, input, output, { inW, inH, fit, hasAudio: hasAudio(input), stats }), { stdio: ["ignore", "inherit", "inherit"] });
+  if (r.status !== 0) {
+    err(`ae: ffmpeg failed encoding ${output}`);
+    return 1;
+  }
+  return 0;
+}
+function describe(file) {
+  const v = probeVideo(file);
+  const fps = rate(v.avgFrameRate);
+  const alpha = /^(yuva|rgba|argb|bgra|abgr|gbrap|ya)/.test(v.pixFmt) || v.pixFmt === "pal8";
+  const dur = Number(v.duration);
+  return `${v.width}x${v.height} ${isNaN(fps) ? "?" : +fps.toFixed(3)}fps ${isNaN(dur) ? "?" : dur.toFixed(2)}s ${v.codec} ${v.pixFmt}${alpha ? " (alpha)" : ""} audio=${hasAudio(file) ? "yes" : "no"} size=${(statSync3(file).size / 1048576).toFixed(1)}MB`;
+}
+function ameInstalled() {
+  try {
+    return readdirSync2("/Applications").some((d) => d.startsWith("Adobe Media Encoder"));
+  } catch {
+    return false;
+  }
+}
+async function exportWithAme(comp, preset, target, span, timeout, wait) {
+  if (!ameInstalled()) die("Adobe Media Encoder not found in /Applications; export without --ame");
+  if (preset.name !== "youtube-1080") {
+    err(`ae: --ame encodes with AE's H.264 template at the comp size; the '${preset.name}' preset's size and codec are not applied`);
+  }
+  const written = await renderInAe(comp, target, { kind: "h264", ame: true, ...span }, 120);
+  if (typeof written === "number") return written;
+  out("AME " + written);
+  if (!wait) {
+    err("ae: Media Encoder is encoding in the background; add --wait to wait for the file");
+    return 0;
+  }
+  err("ae: waiting for Media Encoder...");
+  const start = Date.now();
+  let lastSize = -1;
+  let stableSince = 0;
+  while (Date.now() - start < timeout * 1e3) {
+    await sleep(1e3);
+    if (!isFile(written)) continue;
+    const size = statSync3(written).size;
+    if (size > 0 && size === lastSize) {
+      if (!stableSince) stableSince = Date.now();
+      if (Date.now() - stableSince >= 5e3 && Number(probeVideo(written).duration) > 0) {
+        out("EXPORT " + written);
+        out(describe(written));
+        return 0;
+      }
+    } else {
+      stableSince = 0;
+    }
+    lastSize = size;
+  }
+  err(`ae: timeout: Media Encoder did not finish ${written} within ${timeout}s`);
+  return 3;
+}
+
 // src/commands/inspect.ts
+import { mkdirSync as mkdirSync3 } from "node:fs";
+import path7 from "node:path";
 async function cmdDump(argv) {
   const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys"], ["--no-keys", "--raw-text"]);
   if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]');
@@ -6713,7 +6956,7 @@ async function cmdSnap(argv) {
   if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
   const frames = parseFrames(spec);
   const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = abspath(str(p, "--out") || path6.join(WORK, "snap", prefix));
+  const dir = abspath(str(p, "--out") || path7.join(WORK, "snap", prefix));
   mkdirSync3(dir, { recursive: true });
   const code = `AE.snap(AE.comp(${jsstr(comp)}), [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});
 `;
@@ -6728,7 +6971,7 @@ async function cmdSnap(argv) {
     cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
   }
   if (p.opts["--sheet"] && cells.length) {
-    const sheet = path6.join(dir, prefix + "_sheet.png");
+    const sheet = path7.join(dir, prefix + "_sheet.png");
     makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), cells);
     out("SHEET " + sheet);
   }
@@ -6736,8 +6979,8 @@ async function cmdSnap(argv) {
 }
 
 // src/commands/media.ts
-import { mkdirSync as mkdirSync4, readdirSync as readdirSync2, rmSync as rmSync2 } from "node:fs";
-import path7 from "node:path";
+import { mkdirSync as mkdirSync4, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
+import path8 from "node:path";
 async function cmdSheet(argv) {
   const p = parseArgs(argv, "sheet", ["--cols", "--width"]);
   const [outFile, ...images] = p.pos;
@@ -6778,15 +7021,15 @@ async function cmdFrames(argv) {
   const to = Number(str(p, "--to", v.duration));
   const fps = rate(v.avgFrameRate);
   const base2 = basenameNoExt(vid).replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = path7.join(WORK, "frames", base2);
+  const dir = path8.join(WORK, "frames", base2);
   mkdirSync4(dir, { recursive: true });
-  for (const f of readdirSync2(dir)) if (/^cell_.*\.png$/.test(f)) rmSync2(path7.join(dir, f), { force: true });
-  const sheet = abspath(str(p, "--out") || path7.join(WORK, "frames", base2 + "_sheet.png"));
+  for (const f of readdirSync3(dir)) if (/^cell_.*\.png$/.test(f)) rmSync3(path8.join(dir, f), { force: true });
+  const sheet = abspath(str(p, "--out") || path8.join(WORK, "frames", base2 + "_sheet.png"));
   const cells = [];
   for (let i2 = 0; i2 < n; i2++) {
     const t = (from + (to - from) * (i2 + 0.5) / n).toFixed(3);
     const sf = isNaN(fps) ? "?" : String(Math.floor(Number(t) * fps + 0.5));
-    const png = path7.join(dir, `cell_${String(i2).padStart(3, "0")}.png`);
+    const png = path8.join(dir, `cell_${String(i2).padStart(3, "0")}.png`);
     const r = run("ffmpeg", ["-v", "error", "-y", "-ss", t, "-i", vid, "-frames:v", "1", "-vf", `scale=${width}:-2`, "-update", "1", png], { stdio: ["ignore", "inherit", "inherit"] });
     if (r.status !== 0) die(`ffmpeg failed at t=${t}`);
     out(`${String(i2).padStart(2)}  t=${t}s  srcframe=${sf}`);
@@ -6798,8 +7041,8 @@ async function cmdFrames(argv) {
 }
 
 // src/commands/save.ts
-import { copyFileSync, mkdirSync as mkdirSync5, statSync as statSync3, utimesSync } from "node:fs";
-import path8 from "node:path";
+import { copyFileSync, mkdirSync as mkdirSync5, statSync as statSync4, utimesSync } from "node:fs";
+import path9 from "node:path";
 var logValue = (log, key) => (readLog(log).split("\n").find((l) => l.startsWith(key + " ")) ?? "").slice(key.length + 1);
 async function cmdSave(argv) {
   const usage = () => die("usage: ae save [--backup] [--status] [--as file.aep]");
@@ -6825,16 +7068,16 @@ async function cmdSave(argv) {
     }
   } else {
     if (!/\.aepx?$/.test(as)) die("--as path must end in .aep or .aepx");
-    if (!isDir(path8.dirname(as))) die("folder does not exist: " + path8.dirname(as));
+    if (!isDir(path9.dirname(as))) die("folder does not exist: " + path9.dirname(as));
   }
   if (p.opts["--backup"] && project && isFile(project)) {
-    const name = path8.basename(project);
-    const ext = path8.extname(name);
-    const dest = path8.join(path8.dirname(project), "Backups", `${name.slice(0, name.length - ext.length)}-${stamp(/* @__PURE__ */ new Date())}${ext}`);
+    const name = path9.basename(project);
+    const ext = path9.extname(name);
+    const dest = path9.join(path9.dirname(project), "Backups", `${name.slice(0, name.length - ext.length)}-${stamp(/* @__PURE__ */ new Date())}${ext}`);
     try {
-      mkdirSync5(path8.dirname(dest), { recursive: true });
+      mkdirSync5(path9.dirname(dest), { recursive: true });
       copyFileSync(project, dest);
-      const s2 = statSync3(project);
+      const s2 = statSync4(project);
       utimesSync(dest, s2.atime, s2.mtime);
     } catch {
       die(`backup failed (${dest}); not saved`);
@@ -6849,7 +7092,7 @@ async function cmdSave(argv) {
     err(`ae: save did not confirm (log: ${sv.log})`);
     return 1;
   }
-  const s = statSync3(saved);
+  const s = statSync4(saved);
   out(`saved: ${saved} (${humanSize(s.size)}, ${s.mtime.toTimeString().slice(0, 8)})`);
   if (logValue(sv.log, "DIRTY") !== "false") err("ae: warning: AE still reports unsaved changes");
   return 0;
@@ -6870,7 +7113,7 @@ function humanSize(n) {
 
 // src/commands/script.ts
 import { mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import path9 from "node:path";
+import path10 from "node:path";
 async function cmdRun(argv) {
   const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo"]);
   let script = p.pos[p.pos.length - 1] ?? "";
@@ -6879,7 +7122,7 @@ async function cmdRun(argv) {
   script = abspath(script);
   let log = str(p, "--log");
   if (!log) {
-    log = script.startsWith(TOOLS + path9.sep) ? path9.join(WORK, "logs", path9.basename(script).replace(/\.jsx$/, "") + ".log") : script.replace(/\.jsx$/, "") + ".log";
+    log = script.startsWith(TOOLS + path10.sep) ? path10.join(WORK, "logs", path10.basename(script).replace(/\.jsx$/, "") + ".log") : script.replace(/\.jsx$/, "") + ".log";
   }
   log = abspath(log);
   let undo;
@@ -6887,24 +7130,24 @@ async function cmdRun(argv) {
   else if (p.opts["--undo"]) undo = true;
   else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync3(script, "utf8"));
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0;
-  return runJsx(script, log, { undo, label: path9.basename(script), timeout });
+  return runJsx(script, log, { undo, label: path10.basename(script), timeout });
 }
 async function cmdEval(argv) {
   const undo = !argv.includes("--ro");
   const code = argv.filter((a) => a !== "--ro").join("\n");
   if (!code) die("usage: ae eval 'js code' [--ro]   (an expression's value is logged)");
-  const dir = path9.join(WORK, "eval");
+  const dir = path10.join(WORK, "eval");
   mkdirSync6(dir, { recursive: true });
-  const f = path9.join(dir, "eval.jsx");
+  const f = path10.join(dir, "eval.jsx");
   writeFileSync3(f, isExpr(code) ? `var __r = (${code}
 );
 if (__r !== undefined) { log(__r); }
 ` : code + "\n");
-  return runJsx(f, path9.join(dir, "eval.log"), { undo, label: "ae eval" });
+  return runJsx(f, path10.join(dir, "eval.log"), { undo, label: "ae eval" });
 }
 async function cmdCheck(argv) {
   if (!argv.length) die("usage: ae check script.jsx [more.jsx ...]");
-  mkdirSync6(path9.join(WORK, "run"), { recursive: true });
+  mkdirSync6(path10.join(WORK, "run"), { recursive: true });
   let code = 0;
   for (const f of argv) {
     if (!isFile(f)) {
@@ -6913,16 +7156,16 @@ async function cmdCheck(argv) {
       code = 2;
       continue;
     }
-    if (prep(f, path9.join(WORK, "run", "check.prep.jsx"), LIB)) out("ok: " + f);
+    if (prep(f, path10.join(WORK, "run", "check.prep.jsx"), LIB)) out("ok: " + f);
     else code = 2;
   }
   return code;
 }
 
 // src/commands/setup.ts
-import { mkdirSync as mkdirSync7, readdirSync as readdirSync3, readFileSync as readFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync4 } from "node:fs";
 import os from "node:os";
-import path10 from "node:path";
+import path11 from "node:path";
 async function cmdDoctor() {
   let fails = 0;
   const ok = (m) => out("ok    " + m);
@@ -6952,7 +7195,7 @@ async function cmdDoctor() {
   if (prefs) {
     const text = readFileSync4(prefs, "utf8").replace(/\r/g, "\n");
     const m = /"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "?(\d+)"?/.exec(text);
-    if (m && Number(m[1]) === 1) ok(`scripts may write files (prefs ${path10.basename(prefs)})`);
+    if (m && Number(m[1]) === 1) ok(`scripts may write files (prefs ${path11.basename(prefs)})`);
     else if (m) fail(`scripts may not write files, so ae never sees the log. In AE: ${pref}`);
     else warn(`could not read the scripting pref in ${prefs}; make sure ${pref} is on`);
   } else {
@@ -6984,11 +7227,11 @@ function prefsFile(app2) {
   const year = /(20\d\d)$/.exec(app2);
   if (!year) return "";
   const major = Number(year[1]) - 2e3;
-  const dir = path10.join(os.homedir(), "Library/Preferences/Adobe/After Effects");
+  const dir = path11.join(os.homedir(), "Library/Preferences/Adobe/After Effects");
   let best = -1;
   let ver = "";
   try {
-    for (const d of readdirSync3(dir)) {
+    for (const d of readdirSync4(dir)) {
       const m = new RegExp(`^${major}\\.(\\d+)$`).exec(d);
       if (m && Number(m[1]) > best) {
         best = Number(m[1]);
@@ -6998,7 +7241,7 @@ function prefsFile(app2) {
   } catch {
     return "";
   }
-  const f = ver ? path10.join(dir, ver, `Adobe After Effects ${ver} Prefs.txt`) : "";
+  const f = ver ? path11.join(dir, ver, `Adobe After Effects ${ver} Prefs.txt`) : "";
   return f && isFile(f) ? f : "";
 }
 async function captureStderr(fn) {
@@ -7021,8 +7264,8 @@ async function cmdSelftest(argv) {
     return 3;
   }
   need("ffmpeg");
-  mkdirSync7(path10.join(WORK, "logs"), { recursive: true });
-  const clip = path10.join(WORK, "__aetools_clip.mp4");
+  mkdirSync7(path11.join(WORK, "logs"), { recursive: true });
+  const clip = path11.join(WORK, "__aetools_clip.mp4");
   if (!isFile(clip)) {
     const src = ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=6"];
     const x264 = run("ffmpeg", ["-v", "error", "-y", ...src, "-c:v", "libx264", "-pix_fmt", "yuv420p", clip]);
@@ -7030,16 +7273,16 @@ async function cmdSelftest(argv) {
       die("ffmpeg could not create " + clip);
     }
   }
-  const code = await runJsx(path10.join(TOOLS, "tests", "selftest.jsx"), path10.join(WORK, "logs", "selftest.log"), { undo: false, label: "selftest.jsx" });
+  const code = await runJsx(path11.join(TOOLS, "tests", "selftest.jsx"), path11.join(WORK, "logs", "selftest.log"), { undo: false, label: "selftest.jsx" });
   if (!keep) {
-    const c = await runJsx(path10.join(TOOLS, "tests", "cleanup.jsx"), path10.join(WORK, "logs", "cleanup.log"), { undo: false, label: "cleanup.jsx", quiet: true });
+    const c = await runJsx(path11.join(TOOLS, "tests", "cleanup.jsx"), path11.join(WORK, "logs", "cleanup.log"), { undo: false, label: "cleanup.jsx", quiet: true });
     if (c === 0) err("ae: cleanup done");
   }
   return code;
 }
 async function cmdCompletion(argv) {
   if (argv[0] !== "zsh") die('usage: ae completion zsh   (then add  eval "$(ae completion zsh)"  to ~/.zshrc)');
-  process.stdout.write(readFileSync4(path10.join(TOOLS, "completions", "_ae"), "utf8"));
+  process.stdout.write(readFileSync4(path11.join(TOOLS, "completions", "_ae"), "utf8"));
   return 0;
 }
 async function cmdNames(argv) {
@@ -7067,10 +7310,10 @@ async function cmdHook() {
     return 0;
   }
   const file = input.tool_input?.file_path ?? "";
-  if (!file.endsWith(".jsx") || file.includes(`${path10.sep}node_modules${path10.sep}`) || !isFile(file)) return 0;
+  if (!file.endsWith(".jsx") || file.includes(`${path11.sep}node_modules${path11.sep}`) || !isFile(file)) return 0;
   const src = readFileSync4(file, "utf8").replace(/^﻿/, "");
   if (!looksLikeExtendScript(src)) return 0;
-  const { errors, warnings } = check(src, path10.basename(file), LIB);
+  const { errors, warnings } = check(src, path11.basename(file), LIB);
   if (errors.length) {
     err(`ae check: ${file} would fail in After Effects (ExtendScript is ES3). Fix before running it:
 ` + [...errors, ...warnings].join("\n"));
@@ -7084,7 +7327,7 @@ async function cmdHook() {
 }
 
 // src/cli.ts
-var USAGE = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
+var USAGE2 = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
   ae run script.jsx [--log file] [--ro|--undo] [--timeout s]
   ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
   ae dump "Comp" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]
@@ -7093,6 +7336,8 @@ var USAGE = `ae - drive Adobe After Effects from the shell (macOS). See README.m
   ae sheet out.png a.png b.png ... [--cols N] [--width px]
   ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]
   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
+  ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+  ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
   ae doctor                       check node/ffmpeg/AE/permissions/prefs      ae selftest [--keep]
   ae completion zsh               zsh completion; add to ~/.zshrc:  eval "$(ae completion zsh)"
@@ -7109,6 +7354,7 @@ var COMMANDS = {
   sheet: cmdSheet,
   frames: cmdFrames,
   probe: cmdProbe,
+  export: cmdExport,
   save: cmdSave,
   doctor: cmdDoctor,
   selftest: cmdSelftest,
@@ -7119,17 +7365,17 @@ var COMMANDS = {
 async function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === void 0) {
-    process.stdout.write(USAGE);
+    process.stdout.write(USAGE2);
     return 2;
   }
   if (cmd === "-h" || cmd === "--help" || cmd === "help") {
-    process.stdout.write(USAGE);
+    process.stdout.write(USAGE2);
     return 0;
   }
   const fn = COMMANDS[cmd];
   if (!fn) {
     err(`ae: unknown command '${cmd}'`);
-    process.stdout.write(USAGE);
+    process.stdout.write(USAGE2);
     return 2;
   }
   try {
@@ -7152,6 +7398,6 @@ main(process.argv.slice(2)).then(
   }
 );
 export {
-  USAGE,
+  USAGE2 as USAGE,
   main
 };

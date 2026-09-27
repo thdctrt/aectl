@@ -115,5 +115,11 @@ AE.run("aetools test", function (log) {
     log(AE.dump(c, { depth: 1 }));
     var pngs = AE.snap(c, [0, 30, 60], AE.tmp + "/selftest", "selftest", "half");
     check("snap queued (ae run waits for the files)", pngs.length === 3, pngs[0]);
+
+    // ---- render: 5 frames through the render queue; the user's queue must be left as it was
+    var rq = app.project.renderQueue, rqBefore = rq.numItems;
+    var rendered = AE.render(c, AE.tmp + "/selftest/render.mov", { from: 0, to: 4 });
+    check("render wrote a file", new File(rendered).exists && new File(rendered).length > 0, rendered);
+    check("render left the render queue as it was", rq.numItems === rqBefore, [rqBefore, rq.numItems]);
     log(fails === 0 ? "ALL PASS" : "ERR " + fails + " check(s) failed");
 });

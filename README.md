@@ -61,7 +61,7 @@ Then run the check. It tells you exactly what to fix:
 
 ```sh
 ae doctor      # node, ffmpeg, the AE scripting pref, macOS Automation permission, a round trip to AE
-ae selftest    # 40 checks in a throwaway comp, cleaned up afterwards
+ae selftest    # 42 checks in a throwaway comp, cleaned up afterwards
 ```
 
 Two things usually need a one-time click:
@@ -104,6 +104,7 @@ full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent h
 | `ae snap "Comp" 0-90:15 --sheet` | render frames to PNG, optionally as a contact sheet |
 | `ae sheet out.png a.png b.png` | contact sheet from any images |
 | `ae frames video.mp4` / `ae probe video.mp4` | sample a clip into a sheet / size, fps (flags VFR), duration |
+| `ae export "Comp" --preset youtube-1080` | render and encode for YouTube, Shorts/Reels, web, ProRes, alpha, GIF (`--list`); `--ame` uses Media Encoder |
 | `ae save [--backup]` | save the project (only when you mean it) |
 | `ae doctor` / `ae selftest` | check the setup / run the self-test |
 | `ae completion zsh` | print the zsh completion script |

@@ -65,7 +65,7 @@ With AE running, **in a scratch project, not someone's working one**:
 It generates a 6 s test clip with ffmpeg (`$TMPDIR/ae-tools/__aetools_clip.mp4`, reused by later runs; delete it
 to regenerate), then runs `tests/selftest.jsx`. That creates `__aetools_test`, `__aetools_test_src`, the folder
 `__aetools_test_folder` and imports the clip. It checks trim/shift/setText (a real typewriter expression, plus keyed
-Source Text)/key/copyEase/replaceFootage/cover/dump and snaps 3 frames, and must print `ALL PASS` (40 checks). The
+Source Text)/key/copyEase/replaceFootage/cover/dump, snaps 3 frames and renders 5 frames through the render queue (`AE.render`), and must print `ALL PASS` (42 checks). The
 `WARN trim ... wanted in=0 out=240` line is expected: that check trims past the end of the source on purpose.
 Then `tests/cleanup.jsx` removes exactly those items. It is idempotent and never saves. The self-test never touches
 existing comps or layers, but it leaves two entries in the undo history and marks the project as changed. Never

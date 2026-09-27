@@ -29,6 +29,7 @@ _ae() {
     'sheet:contact sheet from images'
     'frames:sample a video into a contact sheet'
     'probe:video size, fps, duration'
+    'export:render a comp and encode it for YouTube, Reels, web, ProRes, GIF...'
     'save:save the open project'
     'doctor:check the setup'
     'selftest:run the self-test in a throwaway comp'
@@ -92,6 +93,21 @@ _ae() {
         $sheetopts ;;
     probe)
       _arguments "1:video:$video" '--fps[also print the length in comp frames]:fps:' ;;
+    export)
+      _arguments \
+        '1:comp:_ae_comps' \
+        '--preset[output preset]:preset:(youtube-1080 youtube-4k shorts reels tiktok square web prores prores-alpha webm-alpha gif)' \
+        '--out[output file]:file:_files' \
+        '(--from --to)--full[whole comp instead of the work area]' \
+        '(--full)--from[first comp frame]:frame:' \
+        '(--full)--to[last comp frame]:frame:' \
+        '--fit[when the aspect differs]:fit:(pad crop)' \
+        '--force[overwrite the output file]' \
+        '--keep-intermediate[keep the master AE rendered]' \
+        '--timeout[seconds to wait for the render]:seconds:' \
+        '--ame[encode in Adobe Media Encoder]' \
+        '--wait[with --ame: wait for the file]' \
+        '--list[list the presets]' ;;
     save)
       _arguments \
         '--status[only report path and unsaved changes]' \
