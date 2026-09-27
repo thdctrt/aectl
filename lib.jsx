@@ -945,7 +945,7 @@ var AE = (function () {
             var nm = path ? path + "/" + p.name : p.name;
             if (p.propertyType === PropertyType.PROPERTY) {
                 var hasExpr = false;
-                try { hasExpr = p.canSetExpression && p.expressionEnabled && p.expression !== ""; } catch (e1) { }
+                try { hasExpr = p.canSetExpression && p.expression !== ""; } catch (e1) { }
                 var nk = 0;
                 try { nk = p.numKeys; } catch (e2) { }
                 if (nk > 0 || hasExpr) {
@@ -959,7 +959,10 @@ var AE = (function () {
                     if (hasExpr) {
                         var ex = String(p.expression).replace(/\r\n|\r|\n/g, " ⏎ ");
                         if (ex.length > 400) { ex = ex.substr(0, 400) + "..."; }
-                        lines.push(ind + "  expr: " + ex);
+                        lines.push(ind + "  expr" + (p.expressionEnabled ? "" : " (OFF)") + ": " + ex);
+                        var err = "";
+                        try { err = p.expressionError; } catch (e3) { }
+                        if (err) { lines.push(ind + "  expr ERROR: " + String(err).replace(/\r\n|\r|\n/g, " ")); }
                     }
                 }
             } else {
@@ -967,32 +970,97 @@ var AE = (function () {
             }
         }
     }
+    var STATIC_SKIP = { "ADBE Transform Group": 1, "ADBE Effect Parade": 1, "ADBE Marker": 1, "ADBE Material Options Group": 1,
+        "ADBE Plane Options Group": 1, "ADBE Extrsn Options Group": 1, "ADBE Text Document": 1 };
+    function plainValue(p) {
+        try {
+            var t = p.propertyValueType;
+            return t !== PropertyValueType.NO_VALUE && t !== PropertyValueType.CUSTOM_VALUE && t !== PropertyValueType.MARKER && t !== PropertyValueType.TEXT_DOCUMENT;
+        } catch (e) { return false; }
+    }
+    function isMod(p) {
+        try { return p.isModified && !(p.numKeys > 0) && !(p.canSetExpression && p.expression !== ""); } catch (e) { return false; }
+    }
+    function valText(p, t) {
+        try {
+            var v = t === undefined ? p.value : p.valueAtTime(t, false);
+            if (p.propertyValueType === PropertyValueType.COLOR) { return A.toHex(v); }
+            return A.str(v);
+        } catch (e) { return "?"; }
+    }
+    // changed, un-keyed, expression-free values of an effect: "Name=value, ..." (keyed ones are listed with the keys)
+    function fxParams(e, t) {
+        var out = [];
+        for (var i = 1; i <= e.numProperties; i++) {
+            var p;
+            try { p = e.property(i); } catch (e1) { continue; }
+            if (!p || p.propertyType !== PropertyType.PROPERTY || !isMod(p)) { continue; }
+            if (!plainValue(p)) { continue; }
+            out.push(p.name + "=" + valText(p, t));
+        }
+        return out.join(", ");
+    }
+    // every changed static value below g (shape contents, masks, text animators, layer styles): one line each
+    function walkStatic(g, path, lines, ind, t) {
+        for (var i = 1; i <= g.numProperties; i++) {
+            var p;
+            try { p = g.property(i); } catch (e) { continue; }
+            if (!p || STATIC_SKIP[p.matchName]) { continue; }
+            var nm = path ? path + "/" + p.name : p.name;
+            if (p.propertyType === PropertyType.PROPERTY) {
+                if (!isMod(p)) { continue; }
+                if (!plainValue(p)) { continue; }
+                lines.push(ind + nm + " (" + p.matchName + ") = " + valText(p, t));
+            } else {
+                walkStatic(p, nm, lines, ind, t);
+            }
+        }
+    }
     // Text line for dump. Without an expression the stored text is exact. With an expression, the
     // post-expression text at the layer's last frame is shown (typewriters are complete there),
     // unless raw=true (toggles the expression off to read the source: a net-zero mutation).
-    function textInfo(L, raw) {
+    var JUST_NAMES = null;
+    function textInfo(L, raw, at) {
         var p = A.textProp(L), fd = A.fd(L), td, s;
         if (hasExpr(p) && !raw) {
-            var t = Math.max(L.inPoint, L.outPoint - fd);
+            var t = at !== undefined ? at : Math.max(L.inPoint, L.outPoint - fd);
             td = p.valueAtTime(t, false);
             s = "(expr, post@f" + num(t / fd) + ") '" + escText(td.text) + "'";
         } else {
-            td = hasExpr(p) ? A.textDoc(L, 0) : p.valueAtTime(0, false);
+            td = hasExpr(p) ? A.textDoc(L, at || 0) : p.valueAtTime(at || 0, false);
             s = (hasExpr(p) ? "(raw) " : "") + "'" + escText(td.text) + "'";
         }
         try { s += " font=" + td.font + " size=" + num(td.fontSize) + " track=" + num(td.tracking); } catch (e) { }
         try { if (td.applyFill) { s += " fill=" + A.toHex(td.fillColor); } } catch (e2) { }
         try { if (td.applyStroke) { s += " stroke=" + A.toHex(td.strokeColor) + "/" + num(td.strokeWidth); } } catch (e3) { }
+        try { s += " leading=" + (td.autoLeading ? "auto" : num(td.leading)); } catch (e4) { }
+        try {
+            if (!JUST_NAMES) {
+                JUST_NAMES = {};
+                var jn = ["LEFT_JUSTIFY", "CENTER_JUSTIFY", "RIGHT_JUSTIFY", "FULL_JUSTIFY_LASTLINE_LEFT", "FULL_JUSTIFY_LASTLINE_CENTER", "FULL_JUSTIFY_LASTLINE_RIGHT", "FULL_JUSTIFY_LASTLINE_FULL"];
+                for (var j = 0; j < jn.length; j++) { try { JUST_NAMES[ParagraphJustification[jn[j]]] = jn[j].replace(/_JUSTIFY/, "").toLowerCase(); } catch (e5) { } }
+            }
+            s += " just=" + (JUST_NAMES[td.justification] || td.justification);
+        } catch (e6) { }
+        try { if (td.boxText) { s += " box=" + num(td.boxTextSize[0]) + "x" + num(td.boxTextSize[1]) + "@" + num(td.boxTextPos[0]) + "," + num(td.boxTextPos[1]); } } catch (e7) { }
+        try {
+            var r = L.sourceRectAtTime(at !== undefined ? at : Math.max(L.inPoint, L.outPoint - fd), false);
+            s += " ink=[" + num(r.left) + "," + num(r.top) + " " + num(r.width) + "x" + num(r.height) + "]";
+        } catch (e8) { }
         return s;
     }
     // Readable tree of a comp. o: {depth:0 (precomp recursion), keys:true, maxKeys:30, filter:name|RegExp,
-    //   rawText:false (true = read expression-driven Source Text raw; mutates, so run inside AE.run)}.
-    // Transform values are post-expression at the comp current time; "*" = keyed, "~" = expression.
+    //   rawText:false (true = read expression-driven Source Text raw; mutates, so run inside AE.run),
+    //   at: comp frame for the values (default: the comp's current time), props: also every changed static value
+    //   (shape contents, masks, text animators, layer styles)}.
+    // Transform values are post-expression; "*" = keyed, "~" = expression, "~!" = expression with an error.
+    // Effects list their changed parameter values; ink = sourceRectAtTime (layer space).
     A.dump = function (comp, o, _ind, _seen) {
         comp = A.comp(comp);
         o = o || {};
         var ind = _ind || "", lines = [], fd = comp.frameDuration;
         var maxKeys = o.maxKeys || 30;
+        var at = o.atTime !== undefined ? o.atTime : (o.at !== undefined && o.at !== null ? o.at * fd : undefined);
         _seen = _seen || {};
         lines.push(ind + "COMP '" + comp.name + "' id=" + comp.id + " " + comp.width + "x" + comp.height + " " + num(comp.frameRate) + "fps dur=" +
             num(comp.duration / fd) + "f (" + num(comp.duration) + "s) layers=" + comp.numLayers + " folder='" + A.itemPath(comp) + "'" +
@@ -1021,20 +1089,28 @@ var AE = (function () {
                         if (tp.matchName === "ADBE Position" && tp.dimensionsSeparated) { continue; }
                         if (!L.threeDLayer && (tp.matchName === "ADBE Orientation" || tp.matchName === "ADBE Rotate X" || tp.matchName === "ADBE Rotate Y")) { continue; }
                         if (tp.matchName === "ADBE Envir Appear in Reflect") { continue; }
-                        tv.push(tp.name.replace(/ /g, "") + "=" + A.str(tp.value) + (tp.numKeys ? "*" : "") + (tp.expressionEnabled && tp.expression !== "" ? "~" : ""));
+                        var ee = "";
+                        if (tp.expressionEnabled && tp.expression !== "") { ee = "~"; try { if (tp.expressionError) { ee = "~!"; } } catch (e8) { } }
+                        tv.push(tp.name.replace(/ /g, "") + "=" + A.str(at === undefined ? tp.value : tp.valueAtTime(at, false)) + (tp.numKeys ? "*" : "") + ee);
                     } catch (e6) { }
                 }
                 lines.push(ind + "    tf " + tv.join(" "));
             }
             if (L instanceof TextLayer) {
-                try { lines.push(ind + "    text " + textInfo(L, o.rawText)); } catch (e7) { lines.push(ind + "    text ?" + e7.message); }
+                try { lines.push(ind + "    text " + textInfo(L, o.rawText, at)); } catch (e7) { lines.push(ind + "    text ?" + e7.message); }
             }
             // effects list
             var fx = L.property("ADBE Effect Parade");
             if (fx && fx.numProperties > 0) {
                 var names = [];
-                for (var fi = 1; fi <= fx.numProperties; fi++) { names.push(fx.property(fi).name + (fx.property(fi).enabled ? "" : "(off)")); }
-                lines.push(ind + "    fx " + names.join(", "));
+                for (var fi = 1; fi <= fx.numProperties; fi++) {
+                    var ef = fx.property(fi), pv = fxParams(ef, at);
+                    names.push("'" + ef.name + "'" + (ef.name !== ef.matchName ? " (" + ef.matchName + ")" : "") + (ef.enabled ? "" : " OFF") + (pv ? " {" + pv + "}" : ""));
+                }
+                lines.push(ind + "    fx " + names.join("; "));
+            }
+            if (o.props) {
+                walkStatic(L, "", lines, ind + "    prop ", at);
             }
             if (o.keys !== false) {
                 walkAnimated(L, "", fd, lines, ind + "    ", maxKeys);
@@ -1043,7 +1119,8 @@ var AE = (function () {
                 _seen[L.source.id] = true;
                 var sub = {};
                 for (var kk in o) { sub[kk] = o[kk]; }
-                sub.depth = o.depth - 1; sub.filter = null;
+                sub.depth = o.depth - 1; sub.filter = null; sub.at = null;
+                sub.atTime = at === undefined ? undefined : (at - L.startTime) / ((L.stretch || 100) / 100);
                 lines.push(A.dump(L.source, sub, ind + "        ", _seen));
                 _seen[L.source.id] = false;
             }

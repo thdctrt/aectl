@@ -8,14 +8,15 @@ import { readLog, runSnippet } from "../runner.ts";
 import { abspath, die, jsstr, out } from "../util.ts";
 
 export async function cmdDump(argv: string[]): Promise<number> {
-  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys"], ["--no-keys", "--raw-text"]);
-  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]');
+  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys", "--at"], ["--no-keys", "--raw-text", "--props"]);
+  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]');
   const comp = p.pos[p.pos.length - 1];
   const layer = str(p, "--layer");
   const raw = !!p.opts["--raw-text"];
   const code =
     `log(AE.dump(AE.comp(${jsstr(comp)}), {depth: ${int(p, "--depth", 0)}, keys: ${!p.opts["--no-keys"]}, ` +
-    `maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}}));\n`;
+    `maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}, ` +
+    `at: ${p.opts["--at"] === undefined ? "null" : int(p, "--at", 0)}, props: ${!!p.opts["--props"]}}));\n`;
   // --raw-text toggles text expressions off/on to read the source text: one undo step "ae dump"
   return (await runSnippet("dump", "dump", code, { undo: raw, label: "ae dump" })).code;
 }

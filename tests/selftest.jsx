@@ -135,6 +135,11 @@ AE.run("aetools test", function (log) {
     AE.control(R, "color", "Tint", "#0088FF");
     check("control/addEffect/fx stay valid after more effects", near(AE.fx(R, "Amount", 1).value, 5) && AE.fx(R, "Blur").matchName === "ADBE Gaussian Blur 2" &&
         AE.toHex(AE.fx(R, "Tint", 1).value) === "#0088FF");
+    AE.tf(R, "rot").expression = "nope_undefined + 1";
+    var dR = AE.dump(B, { filter: "Box", props: true, at: 5 });
+    AE.tf(R, "rot").expression = "";
+    check("dump: effect values, static props, expression errors", dR.indexOf("{Slider=5}") >= 0 && dR.indexOf("(ADBE Vector Rect Size) = [200,100]") >= 0 &&
+        (dR.indexOf("expr ERROR") >= 0 || dR.indexOf("expr (OFF)") >= 0), dR);
     var rop = AE.tf(R, "opacity");
     AE.key(rop, [[0, 0], [10, 100, { interp: "linear" }], [20, 50, [10, 90]]], { ease: 50 });
     var rk = AE.keys(rop);

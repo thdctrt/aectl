@@ -6963,12 +6963,12 @@ async function exportWithAme(comp, preset, target, span, timeout, wait) {
 import { mkdirSync as mkdirSync3 } from "node:fs";
 import path7 from "node:path";
 async function cmdDump(argv) {
-  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys"], ["--no-keys", "--raw-text"]);
-  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]');
+  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys", "--at"], ["--no-keys", "--raw-text", "--props"]);
+  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]');
   const comp = p.pos[p.pos.length - 1];
   const layer = str(p, "--layer");
   const raw = !!p.opts["--raw-text"];
-  const code = `log(AE.dump(AE.comp(${jsstr(comp)}), {depth: ${int(p, "--depth", 0)}, keys: ${!p.opts["--no-keys"]}, maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}}));
+  const code = `log(AE.dump(AE.comp(${jsstr(comp)}), {depth: ${int(p, "--depth", 0)}, keys: ${!p.opts["--no-keys"]}, maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}, at: ${p.opts["--at"] === void 0 ? "null" : int(p, "--at", 0)}, props: ${!!p.opts["--props"]}}));
 `;
   return (await runSnippet("dump", "dump", code, { undo: raw, label: "ae dump" })).code;
 }
@@ -7395,7 +7395,7 @@ var USAGE2 = `ae - drive Adobe After Effects from the shell (macOS). See README.
   ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]
   ae undo ["step" ...]            take back the last run's undo steps (or the named ones), only while they are AE's last
   ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
-  ae dump "Comp" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]
+  ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
   ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols N] [--width px]
   ae sheet out.png a.png b.png ... [--cols N] [--width px]

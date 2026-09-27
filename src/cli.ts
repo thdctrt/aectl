@@ -11,7 +11,7 @@ export const USAGE = `ae - drive Adobe After Effects from the shell (macOS). See
   ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]
   ae undo ["step" ...]            take back the last run's undo steps (or the named ones), only while they are AE's last
   ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
-  ae dump "Comp" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]
+  ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
   ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols N] [--width px]
   ae sheet out.png a.png b.png ... [--cols N] [--width px]

@@ -58,7 +58,7 @@ ae undo ["step" ...]                                         # take back the las
 ae check script.jsx [more.jsx ...]                           # syntax + ExtendScript lint only (no AE needed)
 ae eval 'AE.comp("Logo").numLayers' [--ro]                   # the value of the last expression is logged
 ae eval 'var c=AE.comp("Logo"); c.duration' --ro             # (or of a top-level `return x`); no IIFE needed
-ae dump "Main" [--depth 1] [--layer "Title"] [--no-keys] [--max-keys N] [--raw-text]
+ae dump "Main" [--depth 1] [--layer "Title"] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
 ae tree [--main "Main"]                                      # all comps (folder, size, fps, dur) + layers of --main (default: active comp)
 ae snap "Main" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols 4] [--width 640]
 ae snap "Intro" 0-84:14 --sheet                     # ranges: a-b or a-b:step
@@ -70,7 +70,7 @@ ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 53 checks in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 54 checks in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -190,11 +190,15 @@ name or numeric id.
 - `AE.undo(step)` undoes that step only if it is AE's last one; returns false (and does nothing) otherwise.
 - `AE.log(...)`, `AE.warn(...)`, `AE.str(anything)`: `str` is a safe stringify for arrays, TextDocument, KeyframeEase,
   Shape, layers and items.
-- `AE.dump(comp, {depth, keys, maxKeys, filter, rawText})` returns the text tree:
+- `AE.dump(comp, {depth, keys, maxKeys, filter, rawText, at, props})` returns the text tree:
   - per layer: index, name, kind, source (and file), in/out/start in frames, stretch, parent, matte, disabled/solo/3D/audio flags;
-  - transform values (post-expression at the comp's current time; `*` = keyed, `~` = expression);
-  - text (font, size, tracking, fill) and the effect list;
-  - every keyed or expression property as `frame:value` with interpolation `LL/BB(inInfl,outInfl)/HH` and the expression text;
+  - transform values (post-expression at the comp's current time, or at frame `at`; `*` = keyed, `~` = expression,
+    `~!` = expression with an error);
+  - text (font, size, tracking, fill, leading, justification, box size/position, `ink` = sourceRectAtTime in layer
+    space) and the effects with their changed parameter values;
+  - every keyed or expression property as `frame:value` with interpolation `LL/BB(inInfl,outInfl)/HH`, the expression
+    text, `(OFF)` when AE disabled it, and `expr ERROR:` with AE's message;
+  - `props`: also every changed static value (shape contents, masks, text animators, layer styles), one `prop` line each;
   - `depth` recurses into precomps.
 - `AE.tree(mainName?)` is the project overview used by `ae tree`.
 - `AE.snap(comp, frames[], outDir?, prefix?, res?)` queues PNGs, logs `PNG <path>` and returns the paths.

@@ -69,6 +69,8 @@ _ae() {
         '--layer[only this layer]:layer:_ae_layers' \
         '--no-keys[omit keyframes]' \
         '--max-keys[keys shown per property]:count:' \
+        '--at[values at this comp frame]:frame:' \
+        '--props[also every changed static value (shape contents, masks, text animators)]' \
         '--raw-text[true Source Text (one undo step)]' ;;
     tree)
       _arguments '--main[comp whose layers to list]:comp:_ae_comps' ;;
