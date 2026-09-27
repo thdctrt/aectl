@@ -6733,6 +6733,7 @@ async function waitPngs(timeoutSec, paths) {
     await sleep(300);
   }
 }
+var UNDO_FILE = path5.join(WORK, "undo.json");
 async function runJsx(user, log, o) {
   need("osascript");
   if (!exists(LIB)) {
@@ -6755,7 +6756,7 @@ async function runJsx(user, log, o) {
   const offset2 = (lib.match(/\n/g)?.length ?? 0) + 1;
   writeFileSync2(
     combined,
-    "try{" + lib + `AE._begin(${jsstr(log)}, ${jsstr(user)}, ${offset2}, ${jsstr(WORK)});AE.run(${jsstr(o.label)}, function (log) {
+    "try{" + lib + `AE._begin(${jsstr(log)}, ${jsstr(user)}, ${offset2}, ${jsstr(WORK)}, ${o.rollback === true});AE.run(${jsstr(o.label)}, function (log) {
 ` + readFileSync2(prepped, "utf8") + `
 }, {undo: ${o.undo}, silent: true});
 AE._end();
@@ -6788,6 +6789,8 @@ AE._end();
   const text = readFileSync2(log, "utf8");
   const lines = text.split("\n");
   const failed = lines.some((l) => l.startsWith("ERR"));
+  const steps = lines.filter((l) => l.startsWith("UNDO ")).map((l) => l.slice(5));
+  if (steps.length) writeFileSync2(UNDO_FILE, JSON.stringify({ steps }) + "\n");
   if (o.quiet) {
     if (failed) process.stderr.write(text);
   } else {
@@ -7156,12 +7159,12 @@ function humanSize(n) {
 }
 
 // src/commands/script.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync3, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import path10 from "node:path";
 async function cmdRun(argv) {
-  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo"]);
+  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo", "--rollback"]);
   let script = p.pos[p.pos.length - 1] ?? "";
-  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--timeout s]");
+  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]");
   if (!isFile(script)) die("no such file: " + script);
   script = abspath(script);
   let log = str(p, "--log");
@@ -7174,7 +7177,7 @@ async function cmdRun(argv) {
   else if (p.opts["--undo"]) undo = true;
   else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync3(script, "utf8"));
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0;
-  return runJsx(script, log, { undo, label: path10.basename(script), timeout });
+  return runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: p.opts["--rollback"] === true });
 }
 async function cmdEval(argv) {
   const undo = !argv.includes("--ro");
@@ -7201,6 +7204,26 @@ async function cmdCheck(argv) {
     else code = 2;
   }
   return code;
+}
+async function cmdUndo(argv) {
+  const p = parseArgs(argv, "undo");
+  let steps = p.pos;
+  if (!steps.length) {
+    try {
+      steps = JSON.parse(readFileSync3(UNDO_FILE, "utf8")).steps;
+    } catch {
+      die('undo: no undo step recorded; name one: ae undo "<step>" (the UNDO line of a run)');
+    }
+  }
+  const code = `var S = [${steps.map(jsstr).join(", ")}];
+for (var i = S.length - 1; i >= 0; i--) {
+    if (!AE.undo(S[i])) { throw new Error("the last step in AE is not '" + S[i] + "' (Edit menu), so nothing more was undone"); }
+    log("UNDONE " + S[i]);
+}
+`;
+  const r = await runSnippet("undo", "undo", code, { undo: false, label: "ae undo", internal: true });
+  if (r.code === 0 && !p.pos.length) rmSync4(UNDO_FILE, { force: true });
+  return r.code;
 }
 
 // src/commands/setup.ts
@@ -7369,7 +7392,8 @@ async function cmdHook() {
 
 // src/cli.ts
 var USAGE2 = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
-  ae run script.jsx [--log file] [--ro|--undo] [--timeout s]
+  ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]
+  ae undo ["step" ...]            take back the last run's undo steps (or the named ones), only while they are AE's last
   ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
   ae dump "Comp" [--depth N] [--layer name] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
@@ -7388,6 +7412,7 @@ Exit codes: 0 ok, 1 script logged ERR, 2 usage/syntax/lint error, 3 AE not runni
 var COMMANDS = {
   run: cmdRun,
   eval: cmdEval,
+  undo: cmdUndo,
   check: cmdCheck,
   dump: cmdDump,
   tree: cmdTree,

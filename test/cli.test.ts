@@ -76,6 +76,14 @@ describe("cli", () => {
     expect(r.err).toContain("is not running");
   });
 
+  it("undo: exit 2 when no run recorded a step, exit 3 without AE", () => {
+    const env = { AE_TMP: tmp() };
+    const r = spawnSync(path.join(ROOT, "ae"), ["undo"], { encoding: "utf8", env: { ...process.env, ...env, AE_APP: "No Such After Effects 2099" } });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("no undo step recorded");
+    expect(ae(["undo", "Retime #1a2b"]).code).toBe(3);
+  });
+
   it("completion zsh prints the script", () => {
     expect(ae(["completion", "zsh"]).out.startsWith("#compdef ae aectl")).toBe(true);
   });

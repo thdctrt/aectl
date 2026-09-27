@@ -61,7 +61,7 @@ Then run the check. It tells you exactly what to fix:
 
 ```sh
 ae doctor      # node, ffmpeg, the AE scripting pref, macOS Automation permission, a round trip to AE
-ae selftest    # 42 checks in a throwaway comp, cleaned up afterwards
+ae selftest    # 44 checks in a throwaway comp, cleaned up afterwards
 ```
 
 Two things usually need a one-time click:
@@ -99,6 +99,7 @@ full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent h
 |---|---|
 | `ae run script.jsx` | lint, run as one undo step, print the log, wait for PNGs; exit 1 on `ERR` |
 | `ae eval 'js'` | run a one-liner; the value of the last expression is printed |
+| `ae undo` | take back the last run, only while it is still AE's last step (`ae run --rollback`: automatically when it fails) |
 | `ae check script.jsx` | syntax + ExtendScript lint only, no AE needed |
 | `ae tree` / `ae dump "Comp"` | project overview / one comp in detail (read-only) |
 | `ae snap "Comp" 0-90:15 --sheet` | render frames to PNG, optionally as a contact sheet |

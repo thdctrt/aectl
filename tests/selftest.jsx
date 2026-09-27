@@ -116,6 +116,12 @@ AE.run("aetools test", function (log) {
     var pngs = AE.snap(c, [0, 30, 60], AE.tmp + "/selftest", "selftest", "half");
     check("snap queued (ae run waits for the files)", pngs.length === 3, pngs[0]);
 
+    // ---- copyLayer returns the copy (copyToComp's own index/reference behaviour, pitfall 11); undo checks the name
+    var nL = c.numLayers, src = AE.layer(c, "__txt"), cp = AE.copyLayer(src, null, { name: "__txt copy" });
+    src = AE.layer(c, "__txt");
+    check("copyLayer returns the copy, above the source", cp.name === "__txt copy" && c.numLayers === nL + 1 && cp.index === src.index - 1 && AE.getText(cp) === AE.getText(src), [cp.index, src.index]);
+    check("undo refuses a step that is not the last one", AE.undo("__aetools no such step") === false);
+
     // ---- render: 5 frames through the render queue; the user's queue must be left as it was
     var rq = app.project.renderQueue, rqBefore = rq.numItems;
     var rendered = AE.render(c, AE.tmp + "/selftest/render.mov", { from: 0, to: 4 });

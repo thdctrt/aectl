@@ -142,15 +142,18 @@ var AE = (function () {
     //   opts.undo=false -> no undo group. Nested calls: own try/catch, but no second undo group
     //   (the outer one covers it) and no log write. Under `ae run` the runner writes the log;
     //   standalone without logPath -> AE.tmp/ae_run.log.
+    //   Under the CLI the undo step gets a run id ("Name #1a2b") and is logged as "UNDO <step>", so `ae undo`
+    //   can take back exactly that step. opts.rollback (or `ae run --rollback`): on an error, undo the step at once.
     A.run = function (name, logPath, fn, opts) {
         if (typeof logPath === "function") { opts = fn; fn = logPath; logPath = null; }
         opts = opts || {};
         var outer = A._depth === 0;
         var undo = opts.undo !== false && !A._undoOpen;
         var ret, t0 = new Date().getTime(), ok = true;
+        var step = String(name) + (A._runId ? " #" + A._runId : "");
         A._depth++;
         if (outer) { app.beginSuppressDialogs(); }
-        if (undo) { app.beginUndoGroup(String(name)); A._undoOpen = true; }
+        if (undo) { app.beginUndoGroup(step); A._undoOpen = true; }
         try {
             ret = fn(A.log);
         } catch (e) {
@@ -160,6 +163,12 @@ var AE = (function () {
         if (undo) {
             try { app.endUndoGroup(); } catch (e2) { A._buf.push("ERR endUndoGroup " + e2.message); }
             A._undoOpen = false;
+            if (!ok && (opts.rollback || A._rollback)) {
+                // the run id makes the name unique, so this never takes back an earlier step (or one of the user's)
+                A._buf.push(A.undo(step) ? "ROLLED BACK " + step : "WARN could not roll back '" + step + "' (nothing changed, or AE did not list it)");
+            } else if (A._runId) {
+                A._buf.push("UNDO " + step);
+            }
         }
         if (outer) { try { app.endSuppressDialogs(false); } catch (e3) { } }
         A._depth--;
@@ -179,12 +188,22 @@ var AE = (function () {
     };
 
     // hooks used by the `ae` CLI wrapper
-    A._begin = function (logPath, scriptPath, userOffset, tmp) {
+    A._begin = function (logPath, scriptPath, userOffset, tmp, rollback) {
         if (tmp) { A.tmp = tmp; }
+        A._runId = pad(Math.floor(Math.random() * 65536).toString(16), 4); A._rollback = rollback === true;
         A._buf = []; A._depth = 0; A._undoOpen = false; A.imported = [];
         A._runnerLog = logPath; A._combined = true; A._userOffset = userOffset;
         A.scriptPath = scriptPath;
         A.scriptDir = scriptPath ? String(scriptPath).replace(/\/[^\/]*$/, "") : null;
+    };
+    // Take back the undo step `name` (as logged in "UNDO <name>"), only if it is the last one: AE's Edit menu must
+    // read "Undo <name>". Returns false and does nothing otherwise. Not undoable itself (Redo is, in AE).
+    A.undo = function (name) {
+        var id = 0;
+        try { id = app.findMenuCommandId("Undo " + name); } catch (e) { id = 0; }
+        if (!id) { return false; }
+        app["executeCommand"](id);   // the lint forbids executeCommand in scripts; this call is checked by name
+        return true;
     };
     A._fatal = function (e) {
         A._buf.push("ERR uncaught: " + A.errText(e));
@@ -252,6 +271,26 @@ var AE = (function () {
         }
         return out;
     };
+    // Copy a layer (into its own comp or another one) and return THE COPY. copyToComp puts the copy at an index
+    // that depends on the selection, and the reference you copied from can end up pointing at the copy, so the
+    // copy is found by its new layer id instead. o: {name, above: layer|index (default: the source when copying in
+    // place, else the top)}. The source layer is left as it was; re-fetch it by name if you need it.
+    A.copyLayer = function (layer, comp, o) {
+        o = o || {};
+        comp = comp ? A.comp(comp) : layer.containingComp;
+        var before = {}, i, copy = null;
+        for (i = 1; i <= comp.numLayers; i++) { before[comp.layer(i).id] = true; }
+        var srcId = layer.id, same = layer.containingComp === comp;
+        layer.copyToComp(comp);
+        for (i = 1; i <= comp.numLayers; i++) { if (!before[comp.layer(i).id]) { copy = comp.layer(i); break; } }
+        if (!copy) { throw new Error("copyLayer: the copy of '" + layer.name + "' did not appear in '" + comp.name + "'"); }
+        if (o.name) { copy.name = o.name; }
+        var above = o.above !== undefined ? o.above : (same ? app.project.layerByID(srcId) : null);
+        if (typeof above === "number") { above = comp.layer(above); }
+        if (above && above !== copy) { copy.moveBefore(above); } else if (!above) { copy.moveToBeginning(); }
+        return copy;
+    };
+
     // recursive property search by matchName (or display name)
     A.findProp = function (group, matchName) {
         for (var i = 1; i <= group.numProperties; i++) {

@@ -41,14 +41,20 @@ AE.run("Retime intro", function (log) {          // one Cmd+Z step, dialogs supp
   or to `--log file`. It is printed, and the exit code is 1 if any line starts with `ERR`.
 - Errors come out as `ERR <message> @ my_edit.jsx:12` (line in YOUR file) or `@ lib.jsx:N` when a helper threw.
 - Log line prefixes: `ERR` (failure, exit 1), `WARN` (e.g. a trim that would not stick), `PNG <path>` (the runner waits
-  for that file), `DONE/FAILED <name> (ms)` (end of each `AE.run`).
+  for that file), `DONE/FAILED <name> (ms)` (end of each `AE.run`), `UNDO <step>` (the Cmd+Z step it made, with a run
+  id: `Retime intro #1a2b`), `ROLLED BACK <step>`.
+- **Taking a run back**: `ae undo` undoes the steps of the last run, newest first; `ae undo "Retime intro #1a2b"` one
+  named step. Each is undone only while it is AE's last step (the Edit menu reads "Undo <step>"); otherwise it stops
+  and says so, and never touches anything the user did. `ae run --rollback` undoes a failed run's step right away, so a
+  script that throws halfway leaves nothing behind.
 - Standalone, without the CLI: `#include` the lib and call `AE.run(name, "/abs/log.txt", fn)`. Without a logPath
   it writes to `AE.tmp/ae_run.log`.
 
 ## CLI
 
 ```
-ae run script.jsx [--log file] [--ro|--undo] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
+ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
+ae undo ["step" ...]                                         # take back the last run (or named steps), only while they are AE's last
 ae check script.jsx [more.jsx ...]                           # syntax + ExtendScript lint only (no AE needed)
 ae eval 'AE.comp("Logo").numLayers' [--ro]                   # the value of the last expression is logged
 ae eval 'var c=AE.comp("Logo"); c.duration' --ro             # (or of a top-level `return x`); no IIFE needed
@@ -64,7 +70,7 @@ ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 42 checks in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 44 checks in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -109,6 +115,8 @@ name or numeric id.
 **Lookup**
 - `AE.comp(nameOrId)`: throws if the comp is missing or the name is ambiguous. `AE.comps(name?)` returns all comps with that name.
 - `AE.layer(comp, nameOrIndex)`: throws if missing or ambiguous. `AE.layers(comp, name|RegExp|fn)` returns the list.
+- `AE.copyLayer(layer, comp?, {name, above})` copies a layer and returns **the copy** (found by its new id; pitfall 11).
+  In place it lands right above the source, in another comp at the top, or above `above` (layer or index).
 - `AE.findProp(group, matchNameOrName)` searches recursively. `AE.findProps(...)` returns all matches.
 - `AE.tf(layer, "pos"|"anchor"|"scale"|"rot"|"opacity"|"x"|"y"|matchName)` returns a transform property.
 - `AE.footage(path, folder?)` finds a FootageItem by `file.fsName`, or imports it (into `AE.folder(folder)`).
@@ -160,8 +168,9 @@ name or numeric id.
   Assumes rotation 0. Returns `{scale, min, pos}`.
 
 **Run / log / inspect**
-- `AE.run(name, [logPath], fn(log), [{undo:false}])` and `AE.peek(name, fn)` (no undo group). A nested `AE.run` gets
-  its own try/catch but joins the outer undo group.
+- `AE.run(name, [logPath], fn(log), [{undo:false, rollback:true}])` and `AE.peek(name, fn)` (no undo group). A nested
+  `AE.run` gets its own try/catch but joins the outer undo group. `rollback` undoes the step when `fn` throws.
+- `AE.undo(step)` undoes that step only if it is AE's last one; returns false (and does nothing) otherwise.
 - `AE.log(...)`, `AE.warn(...)`, `AE.str(anything)`: `str` is a safe stringify for arrays, TextDocument, KeyframeEase,
   Shape, layers and items.
 - `AE.dump(comp, {depth, keys, maxKeys, filter, rawText})` returns the text tree:
@@ -182,7 +191,7 @@ name or numeric id.
 
 1. **`"x" + array` throws** ("invalid numeric result") because this engine overloads `+` for arrays. Use `AE.str(v)`,
    `String(arr)` or `arr.join(",")`. `log()` already does this, and the lint warns about `"x" + L.transform.position.value`.
-2. **Never call `app.executeCommand`**. The lint refuses it.
+2. **Never call `app.executeCommand`**. The lint refuses it. To take a step back use `ae undo` / `AE.undo`.
 3. **Wrap mutations**: suppress dialogs, one undo group, try/catch logging `message` + line. This is `AE.run`, and
    `ae run` adds it automatically.
 4. **Logs**: `f.encoding="UTF-8"` **and `f.lineFeed="Unix"`**. The macOS default writes CR, which is why old logs looked
@@ -204,8 +213,8 @@ name or numeric id.
    properties, 2 or 3 for Scale-like ones. The lib reads the target key's own length and adapts.
 10. **Footage**: match by `file.fsName` before importing (`AE.footage`). `replaceSource(item, false)` keeps transforms.
 11. **`layer.copyToComp(comp)` into the same comp**: the new copy goes to index 1, and the JS reference you copied from
-    then points at the copy. Re-fetch both by index right after (`copy = comp.layer(1); orig = comp.layer(2)`). A copy of a
-    disabled layer is disabled too, and a duplicate name gets a ` 2` suffix.
+    then points at the copy. Use `AE.copyLayer`, which returns the copy whatever the index. A copy of a disabled layer is
+    disabled too, and a duplicate name gets a ` 2` suffix.
 12. **New shape layers sit at the comp centre**: `layers.addShape()` sets the layer position to the comp centre,
     so a rect whose own Position is in comp coordinates ends up offset. Set the layer position to `[0,0]` first.
 13. **Time Remap**: removing every key and then calling `setValueAtTime` fails with "property ... is hidden".

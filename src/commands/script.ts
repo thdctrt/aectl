@@ -1,16 +1,16 @@
 // ae run / eval / check
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs, str } from "../args.ts";
 import { LIB, TOOLS, WORK } from "../env.ts";
 import { evalScript, prep } from "../lint.ts";
-import { runJsx } from "../runner.ts";
-import { abspath, die, isFile, out } from "../util.ts";
+import { runJsx, runSnippet, UNDO_FILE } from "../runner.ts";
+import { abspath, die, isFile, jsstr, out } from "../util.ts";
 
 export async function cmdRun(argv: string[]): Promise<number> {
-  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo"]);
+  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo", "--rollback"]);
   let script = p.pos[p.pos.length - 1] ?? "";
-  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--timeout s]");
+  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]");
   if (!isFile(script)) die("no such file: " + script);
   script = abspath(script);
   let log = str(p, "--log");
@@ -25,7 +25,7 @@ export async function cmdRun(argv: string[]): Promise<number> {
   // scripts that call AE.run/AE.peek/app.beginUndoGroup manage their own undo groups; plain scripts get one named after the file
   else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync(script, "utf8"));
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : undefined;
-  return runJsx(script, log, { undo, label: path.basename(script), timeout });
+  return runJsx(script, log, { undo, label: path.basename(script), timeout, rollback: p.opts["--rollback"] === true });
 }
 
 export async function cmdEval(argv: string[]): Promise<number> {
@@ -53,4 +53,26 @@ export async function cmdCheck(argv: string[]): Promise<number> {
     else code = 2;
   }
   return code;
+}
+
+/** ae undo [step ...]: take back the steps of the last run (or the named ones), newest first, each only if it is AE's last step. */
+export async function cmdUndo(argv: string[]): Promise<number> {
+  const p = parseArgs(argv, "undo");
+  let steps = p.pos;
+  if (!steps.length) {
+    try {
+      steps = (JSON.parse(readFileSync(UNDO_FILE, "utf8")) as { steps: string[] }).steps;
+    } catch {
+      die("undo: no undo step recorded; name one: ae undo \"<step>\" (the UNDO line of a run)");
+    }
+  }
+  const code =
+    `var S = [${steps.map(jsstr).join(", ")}];\n` +
+    `for (var i = S.length - 1; i >= 0; i--) {\n` +
+    `    if (!AE.undo(S[i])) { throw new Error("the last step in AE is not '" + S[i] + "' (Edit menu), so nothing more was undone"); }\n` +
+    `    log("UNDONE " + S[i]);\n` +
+    `}\n`;
+  const r = await runSnippet("undo", "undo", code, { undo: false, label: "ae undo", internal: true });
+  if (r.code === 0 && !p.pos.length) rmSync(UNDO_FILE, { force: true });
+  return r.code;
 }
