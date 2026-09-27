@@ -73,7 +73,7 @@ ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 54 checks in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 57 checks in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -167,8 +167,9 @@ name or numeric id.
 - `AE.set(prop, value)` is a `setValue` that pads missing dimensions (z) and throws clearly if the property is keyed.
 
 **Building** (the usual script: resolve every input first, then build; a rebuild never leaves a half-built project)
-- `AE.rebuild(name, [o], fn(comp))` builds `name` again: `fn` fills a new comp; if it throws, the new comp is removed
-  and nothing changed. On success every layer using the old comp is switched to the new one (in/out/start kept), the
+- `AE.rebuild(name, [o], fn(comp))` builds `name` again: `fn` fills a new comp; if it throws, everything the build
+  added (comps, footage, folders) is removed and the old comp is untouched (changes `fn` made to existing items stay:
+  use `ae run --rollback` for those). On success every layer using the old comp is switched to the new one (in/out/start kept), the
   old comp is removed, and the new one takes its name. `o`: `AE.addComp` options (default: like the old comp) and
   `replace` (comp names/items/folders of the previous build to remove after a success).
 - `AE.addComp(name, {w, h, dur (frames), fps, like, folder, bg})`, `AE.remove(compName|item|folder|layer|[...])`.
@@ -199,7 +200,8 @@ name or numeric id.
 **Run / log / inspect**
 - `AE.run(name, [logPath], fn(log), [{undo:false, rollback:true}])` and `AE.peek(name, fn)` (no undo group). A nested
   `AE.run` gets its own try/catch but joins the outer undo group. `rollback` undoes the step when `fn` throws.
-- `AE.undo(step)` undoes that step only if it is AE's last one; returns false (and does nothing) otherwise.
+- `AE.undo(step)` undoes that step only if it is AE's last one; returns false (and does nothing) otherwise. Throws
+  inside an undo group (in `AE.run`): use `ae undo` or `rollback` there.
 - `AE.log(...)`, `AE.warn(...)`, `AE.str(anything)`: `str` is a safe stringify for arrays, TextDocument, KeyframeEase,
   Shape, layers and items.
 - `AE.dump(comp, {depth, keys, maxKeys, filter, rawText, at, props})` returns the text tree:

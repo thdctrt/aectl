@@ -7535,7 +7535,12 @@ for (var i = S.length - 1; i >= 0; i--) {
 }
 `;
   const r = await runSnippet("undo", "undo", code, { undo: false, label: "ae undo", internal: true });
-  if (r.code === 0 && !p.pos.length) rmSync4(UNDO_FILE, { force: true });
+  if (!p.pos.length && r.code !== 3) {
+    const done = new Set(readLog(r.log).split("\n").filter((l) => l.startsWith("UNDONE ")).map((l) => l.slice(7)));
+    const left = steps.filter((s) => !done.has(s));
+    if (left.length) writeFileSync3(UNDO_FILE, JSON.stringify({ steps: left }) + "\n");
+    else rmSync4(UNDO_FILE, { force: true });
+  }
   return r.code;
 }
 
@@ -7650,12 +7655,51 @@ async function cmdSelftest(argv) {
       die("ffmpeg could not create " + clip);
     }
   }
-  const code = await runJsx(path11.join(TOOLS, "tests", "selftest.jsx"), path11.join(WORK, "logs", "selftest.log"), { undo: false, label: "selftest.jsx" });
+  let code = await runJsx(path11.join(TOOLS, "tests", "selftest.jsx"), path11.join(WORK, "logs", "selftest.log"), { undo: false, label: "selftest.jsx" });
+  if (code === 0) code = await undoRoundTrip();
   if (!keep) {
     const c = await runJsx(path11.join(TOOLS, "tests", "cleanup.jsx"), path11.join(WORK, "logs", "cleanup.log"), { undo: false, label: "cleanup.jsx", quiet: true });
     if (c === 0) err("ae: cleanup done");
   }
   return code;
+}
+async function undoRoundTrip() {
+  const T = 'AE.comp("__aetools_test")';
+  const CHECK = `function check(name, ok, info) { log((ok ? "PASS " : "ERR FAIL ") + name + (info === undefined ? "" : "  " + AE.str(info))); }
+`;
+  const change = await runSnippet("selftest", "undo_change", `AE.run("aetools undo probe", function () { ${T}.comment = "undo probe"; });
+`, { undo: false, label: "undo probe", quiet: true });
+  const step = readLog(change.log).split("\n").find((l) => l.startsWith("UNDO "))?.slice(5) ?? "";
+  if (change.code || !step) {
+    err("ae: undo round trip: the probe run failed or logged no UNDO line");
+    return 1;
+  }
+  const undo = await runSnippet(
+    "selftest",
+    "undo_check",
+    CHECK + `check("undo refuses a step that is not the last one", AE.undo("aetools no such step") === false);
+var undone = AE.undo(${jsstr(step)});
+check("undo takes back the last run (Edit menu: Undo " + ${jsstr(step)} + ")", undone && ${T}.comment === "", [undone, ${T}.comment]);
+`,
+    { undo: false, label: "undo check" }
+  );
+  const fail = await runSnippet(
+    "selftest",
+    "rollback_probe",
+    `AE.run("aetools rollback probe", function () { ${T}.comment = "rollback probe"; throw new Error("expected by the self-test"); }, { rollback: true });
+`,
+    { undo: false, label: "rollback probe", quiet: true, rollback: false }
+  );
+  const rolled = readLog(fail.log).includes("ROLLED BACK aetools rollback probe");
+  const rb = await runSnippet(
+    "selftest",
+    "rollback_check",
+    CHECK + `check("rollback takes back a failed run", ${rolled} && ${T}.comment === "", [${rolled}, ${T}.comment]);
+${T}.comment = "";
+`,
+    { undo: false, label: "rollback check" }
+  );
+  return undo.code || rb.code;
 }
 async function cmdCompletion(argv) {
   if (argv[0] !== "zsh") die('usage: ae completion zsh   (then add  eval "$(ae completion zsh)"  to ~/.zshrc)');

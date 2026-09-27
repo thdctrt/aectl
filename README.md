@@ -61,7 +61,7 @@ Then run the check. It tells you exactly what to fix:
 
 ```sh
 ae doctor      # node, ffmpeg, the AE scripting pref, macOS Automation permission, a round trip to AE
-ae selftest    # 54 checks in a throwaway comp, cleaned up afterwards
+ae selftest    # 57 checks in a throwaway comp, cleaned up afterwards
 ```
 
 Two things usually need a one-time click:

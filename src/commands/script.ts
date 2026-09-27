@@ -4,7 +4,7 @@ import path from "node:path";
 import { parseArgs, str } from "../args.ts";
 import { LIB, TOOLS, WORK } from "../env.ts";
 import { evalScript, prep } from "../lint.ts";
-import { runJsx, runSnippet, UNDO_FILE } from "../runner.ts";
+import { readLog, runJsx, runSnippet, UNDO_FILE } from "../runner.ts";
 import { abspath, die, isFile, jsstr, out } from "../util.ts";
 
 export async function cmdRun(argv: string[]): Promise<number> {
@@ -73,6 +73,12 @@ export async function cmdUndo(argv: string[]): Promise<number> {
     `    log("UNDONE " + S[i]);\n` +
     `}\n`;
   const r = await runSnippet("undo", "undo", code, { undo: false, label: "ae undo", internal: true });
-  if (r.code === 0 && !p.pos.length) rmSync(UNDO_FILE, { force: true });
+  if (!p.pos.length && r.code !== 3) {
+    // keep only the steps still to undo, so the next `ae undo` does not retry one that is gone
+    const done = new Set(readLog(r.log).split("\n").filter((l) => l.startsWith("UNDONE ")).map((l) => l.slice(7)));
+    const left = steps.filter((s) => !done.has(s));
+    if (left.length) writeFileSync(UNDO_FILE, JSON.stringify({ steps: left }) + "\n");
+    else rmSync(UNDO_FILE, { force: true });
+  }
   return r.code;
 }

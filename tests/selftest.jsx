@@ -135,9 +135,12 @@ AE.run("aetools test", function (log) {
     AE.control(R, "color", "Tint", "#0088FF");
     check("control/addEffect/fx stay valid after more effects", near(AE.fx(R, "Amount", 1).value, 5) && AE.fx(R, "Blur").matchName === "ADBE Gaussian Blur 2" &&
         AE.toHex(AE.fx(R, "Tint", 1).value) === "#0088FF");
-    AE.tf(R, "rot").expression = "nope_undefined + 1";
-    var dR = AE.dump(B, { filter: "Box", props: true, at: 5 });
-    AE.tf(R, "rot").expression = "";
+    var dR = "";
+    try {
+        AE.tf(R, "rot").expression = "nope_undefined + 1";
+        dR = AE.dump(B, { filter: "Box", props: true, at: 5 });
+        AE.tf(R, "rot").expression = "";
+    } catch (eX) { dR = "threw: " + eX.message; }
     check("dump: effect values, static props, expression errors", dR.indexOf("{Slider=5}") >= 0 && dR.indexOf("(ADBE Vector Rect Size) = [200,100]") >= 0 &&
         (dR.indexOf("expr ERROR") >= 0 || dR.indexOf("expr (OFF)") >= 0), dR);
     var rop = AE.tf(R, "opacity");
@@ -156,9 +159,11 @@ AE.run("aetools test", function (log) {
     var trOk = true; try { AE.key(trp, 5, 2); } catch (eTR) { trOk = false; log("  ", eTR.message); }
     check("clearKeys on Time Remap leaves it usable", trOk && TR.timeRemapEnabled && trp.numKeys >= 2, trp.numKeys);
     var threwB = false;
-    try { AE.rebuild("__aetools_test_build", function () { throw new Error("boom"); }); } catch (eB) { threwB = eB.message === "boom"; }
-    check("failed rebuild leaves the old comp in place", threwB && AE.comps("__aetools_test_build").length === 1 && AE.comps("__aetools_test_build (building)").length === 0 &&
-        AE.layer(c, "__build").source === B);
+    try {
+        AE.rebuild("__aetools_test_build", function (nc) { AE.addComp("__aetools_test_build_pre", { like: nc }); throw new Error("boom"); });
+    } catch (eB) { threwB = eB.message === "boom"; }
+    check("failed rebuild removes what it added, the old comp stays", threwB && AE.comps("__aetools_test_build").length === 1 && AE.comps("__aetools_test_build (building)").length === 0 &&
+        AE.comps("__aetools_test_build_pre").length === 0 && AE.layer(c, "__build").source === B);
     var B2 = AE.rebuild("__aetools_test_build", { dur: 60 }, function (nc) { AE.addText(nc, "New", { name: "__t2" }); });
     var BL2 = AE.layer(c, "__build");
     check("rebuild swaps every use and keeps the placement", BL2.source === B2 && B2.name === "__aetools_test_build" && AE.comps("__aetools_test_build").length === 1 &&
@@ -168,7 +173,8 @@ AE.run("aetools test", function (log) {
     var nL = c.numLayers, src = AE.layer(c, "__txt"), cp = AE.copyLayer(src, null, { name: "__txt copy" });
     src = AE.layer(c, "__txt");
     check("copyLayer returns the copy, above the source", cp.name === "__txt copy" && c.numLayers === nL + 1 && cp.index === src.index - 1 && AE.getText(cp) === AE.getText(src), [cp.index, src.index]);
-    check("undo refuses a step that is not the last one", AE.undo("__aetools no such step") === false);
+    var threwU = false; try { AE.undo("__aetools no such step"); } catch (eU) { threwU = true; }
+    check("undo refuses inside an undo group", threwU);
 
     // ---- render: 5 frames through the render queue; the user's queue must be left as it was
     var rq = app.project.renderQueue, rqBefore = rq.numItems;

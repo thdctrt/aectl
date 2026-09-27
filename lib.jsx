@@ -199,6 +199,7 @@ var AE = (function () {
     // Take back the undo step `name` (as logged in "UNDO <name>"), only if it is the last one: AE's Edit menu must
     // read "Undo <name>". Returns false and does nothing otherwise. Not undoable itself (Redo is, in AE).
     A.undo = function (name) {
+        if (A._undoOpen) { throw new Error("AE.undo inside an undo group (AE.run): use `ae undo`, or AE.run(..., {rollback: true})"); }
         var id = 0;
         try { id = app.findMenuCommandId("Undo " + name); } catch (e) { id = 0; }
         if (!id) { return false; }
@@ -718,7 +719,8 @@ var AE = (function () {
         return n;
     };
     // Build a comp again without ever leaving the project half-built. fn(comp) builds into a new comp; if it throws,
-    // the new comp is removed and everything stays as it was. If it succeeds, every layer that used the old comp
+    // every item the build added (the new comp, precomps, imported footage, folders) is removed and the old comp is
+    // untouched (changes fn made to existing items stay: run with `ae run --rollback` to undo those too). If it succeeds, every layer that used the old comp
     // (anywhere in the project) is switched to the new one, keeping its in/out/start (a layer that ran to the end of
     // the old comp runs to the end of the new one), the old comp is removed, and the new one gets its name.
     // o: AE.addComp options (default: like the old comp), replace: other items of the previous build to remove after
@@ -736,11 +738,16 @@ var AE = (function () {
             if (typeof rep[i] === "string") { var cs = A.comps(rep[i]); for (j = 0; j < cs.length; j++) { extra.push(cs[j]); } }
             else { extra.push(rep[i]); }
         }
+        var before = {};
+        for (i = 1; i <= app.project.numItems; i++) { before[app.project.item(i).id] = true; }
         var c = A.addComp(name + " (building)", spec);
         try {
             fn(c);
         } catch (e) {
-            try { c.remove(); } catch (e2) { }
+            // remove everything the build added (comps, footage, folders); changes to existing items stay (--rollback)
+            for (i = app.project.numItems; i >= 1; i--) {
+                try { if (!before[app.project.item(i).id]) { app.project.item(i).remove(); } } catch (e2) { }
+            }
             throw e;
         }
         if (old) {
