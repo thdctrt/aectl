@@ -28,6 +28,7 @@ _ae() {
     'tree:project overview + layers of the active comp'
     'snap:render comp frames to PNG'
     'sheet:contact sheet from images'
+    'measure:ink bounding box of an image, or how far one is off from another'
     'frames:sample a video into a contact sheet'
     'probe:video size, fps, duration'
     'export:render a comp and encode it for YouTube, Reels, web, ProRes, GIF...'
@@ -81,6 +82,7 @@ _ae() {
         '--out[output dir]:dir:_files -/' \
         '--prefix[file name prefix]:prefix:' \
         '--res[render resolution]:resolution:(full half third quarter)' \
+        '--crop[region in comp pixels]:x,y,w,h:' \
         '--sheet[also build a contact sheet]' \
         '--timeout[seconds to wait for the PNGs]:seconds:' \
         $sheetopts ;;
@@ -89,6 +91,13 @@ _ae() {
         '1:output png:_files -g "*.png(-.)"' \
         '*:image:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \
         $sheetopts ;;
+    measure)
+      _arguments \
+        '1:image:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \
+        '2:image to compare:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \
+        '--box[search only this region]:x,y,w,h:' \
+        '--bg[background colour]:#RRGGBB:' \
+        '--threshold[difference from the background that counts as ink]:0-255:' ;;
     frames)
       _arguments \
         "1:video:$video" \

@@ -102,8 +102,9 @@ full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent h
 | `ae undo` | take back the last run, only while it is still AE's last step (`ae run --rollback`: automatically when it fails) |
 | `ae check script.jsx` | syntax + ExtendScript lint only, no AE needed |
 | `ae tree` / `ae dump "Comp"` | project overview / one comp in detail (read-only) |
-| `ae snap "Comp" 0-90:15 --sheet` | render frames to PNG, optionally as a contact sheet |
+| `ae snap "Comp" 0-90:15 --sheet` | render frames to PNG, optionally as a contact sheet or cropped to a region (`--crop`) |
 | `ae sheet out.png a.png b.png` | contact sheet from any images |
+| `ae measure a.png [b.png]` | ink bounding box, centre and mean colour of an image; with two, how far b is off from a |
 | `ae frames video.mp4` / `ae probe video.mp4` | sample a clip into a sheet / size, fps (flags VFR), duration |
 | `ae export "Comp" --preset youtube-1080` | render and encode for YouTube, Shorts/Reels, web, ProRes, alpha, GIF (`--list`); `--ame` uses Media Encoder |
 | `ae save [--backup]` | save the project (only when you mean it) |

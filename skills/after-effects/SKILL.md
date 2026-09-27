@@ -60,9 +60,10 @@ ae eval 'AE.comp("Logo").numLayers' [--ro]                   # the value of the 
 ae eval 'var c=AE.comp("Logo"); c.duration' --ro             # (or of a top-level `return x`); no IIFE needed
 ae dump "Main" [--depth 1] [--layer "Title"] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
 ae tree [--main "Main"]                                      # all comps (folder, size, fps, dur) + layers of --main (default: active comp)
-ae snap "Main" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols 4] [--width 640]
+ae snap "Main" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols 4] [--width 640]
 ae snap "Intro" 0-84:14 --sheet                     # ranges: a-b or a-b:step
 ae sheet out.png a.png b.png ... [--cols 4] [--width 640]    # contact sheet from any images (labels = file names)
+ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB]       # ink bounding box, centre, mean colour; with b: the b-a delta
 ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]  # pick clip times
 ae probe video.mp4 [--fps 25]                                # size, fps (avg + r; flags VFR), duration, frames, audio;
                                                              # --fps: length in comp frames at that rate
@@ -75,6 +76,10 @@ ae selftest [--keep]                                         # 54 checks in a th
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
   path per line, then `SHEET <path>` with `--sheet`. The comp's own resolution factor is restored afterwards.
+  `--crop x,y,w,h` is in comp pixels at any `--res` (a close-up of one region).
+- `measure`: "ink" is every pixel that is not background (alpha, or the corner colour). Compare a snap with a design
+  render (`ae measure design.png snap.png`): b is scaled to a's size, so a half-res snap works; the delta says how
+  far and in which direction the AE result is off.
 - `dump`/`tree`/`snap` are read-only (no undo group). `dump --raw-text` runs in one undo group "ae dump", see pitfall 6.
 - Env: `AE_TIMEOUT` (log wait, default 300 s), `AE_SNAP_TIMEOUT` (PNG wait, default 60 s), `AE_TMP` (work dir,
   default `$TMPDIR`), `AE_DEBUG=1` (PNG wait timing), `AE_APP` (app name; default: the running AE, else the newest one in /Applications).

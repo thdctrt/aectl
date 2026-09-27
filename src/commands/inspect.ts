@@ -1,11 +1,12 @@
 // ae dump / tree / snap: read-only views of the project
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import { int, parseArgs, str } from "../args.ts";
 import { WORK } from "../env.ts";
-import { makeSheet } from "../media.ts";
+import { cropFilter, makeSheet } from "../media.ts";
+import { parseBox } from "./media.ts";
 import { readLog, runSnippet } from "../runner.ts";
-import { abspath, die, jsstr, out } from "../util.ts";
+import { abspath, die, jsstr, out, run } from "../util.ts";
 
 export async function cmdDump(argv: string[]): Promise<number> {
   const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys", "--at"], ["--no-keys", "--raw-text", "--props"]);
@@ -47,22 +48,26 @@ export function parseFrames(spec: string): number[] {
 }
 
 export async function cmdSnap(argv: string[]): Promise<number> {
-  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout"], ["--sheet"]);
+  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout", "--crop"], ["--sheet"]);
   const [comp, spec] = p.pos;
-  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols N] [--width px]');
+  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]');
+  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
   const res = str(p, "--res", "half");
   if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
   const frames = parseFrames(spec);
   const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
   const dir = abspath(str(p, "--out") || path.join(WORK, "snap", prefix));
   mkdirSync(dir, { recursive: true });
-  const code = `AE.snap(AE.comp(${jsstr(comp)}), [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});\n`;
+  const code = `var c = AE.comp(${jsstr(comp)});\nlog("SIZE " + c.width);\nAE.snap(c, [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});\n`;
   const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout: p.opts["--timeout"] ? Number(p.opts["--timeout"]) : undefined });
   if (r.code) return r.code;
   const cells: { label: string; file: string }[] = [];
-  for (const line of readLog(r.log).split("\n")) {
+  const log = readLog(r.log).split("\n");
+  const compW = Number(log.find((l) => l.startsWith("SIZE "))?.slice(5));
+  for (const line of log) {
     if (!line.startsWith("PNG ")) continue;
     const file = line.slice(4);
+    if (crop) cropPng(file, crop, compW);
     out(file);
     const m = /_f(\d+)\.png$/.exec(file);
     cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
@@ -73,4 +78,14 @@ export async function cmdSnap(argv: string[]): Promise<number> {
     out("SHEET " + sheet);
   }
   return 0;
+}
+
+/** Crop a snapped PNG in place to a region given in comp pixels (the PNG may be at half/third/quarter size). */
+function cropPng(file: string, region: number[], compW: number): void {
+  const b = readFileSync(file);
+  const w = b.readUInt32BE(16), h = b.readUInt32BE(20); // IHDR
+  const tmp = file.replace(/\.png$/, ".crop.png");
+  const r = run("ffmpeg", ["-v", "error", "-y", "-i", file, "-vf", cropFilter(region, compW > 0 ? w / compW : 1, w, h), "-frames:v", "1", "-update", "1", tmp], { stdio: ["ignore", "inherit", "inherit"] });
+  if (r.status !== 0) die(`ffmpeg could not crop ${file}`);
+  renameSync(tmp, file);
 }

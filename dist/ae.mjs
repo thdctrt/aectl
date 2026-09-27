@@ -157,6 +157,7 @@ function labelFont() {
 }
 
 // src/media.ts
+import { spawnSync as spawnSync2 } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path3 from "node:path";
 var safeLabel = (s) => s.replace(/[^A-Za-z0-9 ._#=+-]/g, "_");
@@ -214,6 +215,68 @@ function rate(r) {
 }
 function hasAudio(file) {
   return run("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file]).stdout.trim() !== "";
+}
+function readRgba(file) {
+  need("ffmpeg");
+  need("ffprobe");
+  const probe = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", file]);
+  const m = /^(\d+),(\d+)/.exec(probe.stdout.trim());
+  if (probe.status !== 0 || !m) die(`cannot read image ${file}`);
+  const w = +m[1];
+  const h = +m[2];
+  const r = spawnSync2("ffmpeg", ["-v", "error", "-i", file, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { maxBuffer: w * h * 4 + 1024 });
+  if (r.status !== 0 || r.stdout.length < w * h * 4) die(`ffmpeg could not decode ${file}`);
+  return { w, h, px: r.stdout };
+}
+function measureInk(img, o = {}) {
+  const { w, h, px } = img;
+  const [bx, by, bw, bh] = o.box ?? [0, 0, w, h];
+  const X0 = Math.max(0, bx), Y0 = Math.max(0, by), X1 = Math.min(w, bx + bw), Y1 = Math.min(h, by + bh);
+  let alpha = false;
+  for (let i2 = 3; i2 < px.length; i2 += 4) if (px[i2] < 250) {
+    alpha = true;
+    break;
+  }
+  let bg = o.bg;
+  if (!alpha && !bg) {
+    const at2 = (x, y) => {
+      const i2 = (y * w + x) * 4;
+      return [px[i2], px[i2 + 1], px[i2 + 2]];
+    };
+    const cs = [at2(X0, Y0), at2(X1 - 1, Y0), at2(X0, Y1 - 1), at2(X1 - 1, Y1 - 1)];
+    const key = (c) => c.join(",");
+    const n = /* @__PURE__ */ new Map();
+    for (const c of cs) n.set(key(c), (n.get(key(c)) ?? 0) + 1);
+    bg = cs.reduce((a, c) => (n.get(key(c)) ?? 0) > (n.get(key(a)) ?? 0) ? c : a);
+  }
+  const t = o.threshold ?? 24;
+  let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1, count = 0, r = 0, g = 0, b = 0;
+  for (let y = Y0; y < Y1; y++) {
+    for (let x = X0; x < X1; x++) {
+      const i2 = (y * w + x) * 4;
+      const ink = alpha && !o.bg ? px[i2 + 3] > 8 : Math.max(Math.abs(px[i2] - bg[0]), Math.abs(px[i2 + 1] - bg[1]), Math.abs(px[i2 + 2] - bg[2])) > t;
+      if (!ink) continue;
+      count++;
+      r += px[i2];
+      g += px[i2 + 1];
+      b += px[i2 + 2];
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (!count) return null;
+  const hex = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase()).join("");
+  return { x0, y0, x1, y1, count, mean: [r / count, g / count, b / count], bg: alpha && !o.bg ? "transparent" : hex(bg) };
+}
+function cropFilter(region, scale, imgW, imgH) {
+  const [x, y, w, h] = region.map((v) => v * scale);
+  const X = Math.max(0, Math.min(imgW - 1, Math.round(x)));
+  const Y = Math.max(0, Math.min(imgH - 1, Math.round(y)));
+  const W = Math.max(1, Math.min(imgW - X, Math.round(w)));
+  const H = Math.max(1, Math.min(imgH - Y, Math.round(h)));
+  return `crop=${W}:${H}:${X}:${Y}`;
 }
 
 // src/presets.ts
@@ -6960,74 +7023,12 @@ async function exportWithAme(comp, preset, target, span, timeout, wait) {
 }
 
 // src/commands/inspect.ts
-import { mkdirSync as mkdirSync3 } from "node:fs";
-import path7 from "node:path";
-async function cmdDump(argv) {
-  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys", "--at"], ["--no-keys", "--raw-text", "--props"]);
-  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]');
-  const comp = p.pos[p.pos.length - 1];
-  const layer = str(p, "--layer");
-  const raw = !!p.opts["--raw-text"];
-  const code = `log(AE.dump(AE.comp(${jsstr(comp)}), {depth: ${int(p, "--depth", 0)}, keys: ${!p.opts["--no-keys"]}, maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}, at: ${p.opts["--at"] === void 0 ? "null" : int(p, "--at", 0)}, props: ${!!p.opts["--props"]}}));
-`;
-  return (await runSnippet("dump", "dump", code, { undo: raw, label: "ae dump" })).code;
-}
-async function cmdTree(argv) {
-  const main2 = argv[0] === "--main" && argv[1] !== void 0 ? jsstr(argv[1]) : "null";
-  return (await runSnippet("tree", "tree", `log(AE.tree(${main2}));
-`, { undo: false, label: "ae tree" })).code;
-}
-function parseFrames(spec) {
-  const res = [];
-  const bad = () => die(`bad frame list '${spec}' (use 8,44,90 or 10-100:10)`);
-  for (const part of spec.split(",")) {
-    const range = /^(\d+)-(\d+)(?::(\d+))?$/.exec(part);
-    if (range) {
-      const step = range[3] === void 0 ? 1 : +range[3];
-      if (step <= 0) die(`bad step in '${part}'`);
-      for (let f = +range[1]; f <= +range[2]; f += step) res.push(f);
-    } else if (/^\d+(\.\d+)?$/.test(part)) {
-      res.push(+part);
-    } else {
-      bad();
-    }
-  }
-  if (!res.length) bad();
-  return res;
-}
-async function cmdSnap(argv) {
-  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout"], ["--sheet"]);
-  const [comp, spec] = p.pos;
-  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols N] [--width px]');
-  const res = str(p, "--res", "half");
-  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
-  const frames = parseFrames(spec);
-  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = abspath(str(p, "--out") || path7.join(WORK, "snap", prefix));
-  mkdirSync3(dir, { recursive: true });
-  const code = `AE.snap(AE.comp(${jsstr(comp)}), [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});
-`;
-  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout: p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0 });
-  if (r.code) return r.code;
-  const cells = [];
-  for (const line of readLog(r.log).split("\n")) {
-    if (!line.startsWith("PNG ")) continue;
-    const file = line.slice(4);
-    out(file);
-    const m = /_f(\d+)\.png$/.exec(file);
-    cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
-  }
-  if (p.opts["--sheet"] && cells.length) {
-    const sheet = path7.join(dir, prefix + "_sheet.png");
-    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), cells);
-    out("SHEET " + sheet);
-  }
-  return 0;
-}
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync3, renameSync } from "node:fs";
+import path8 from "node:path";
 
 // src/commands/media.ts
-import { mkdirSync as mkdirSync4, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
-import path8 from "node:path";
+import { mkdirSync as mkdirSync3, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
+import path7 from "node:path";
 async function cmdSheet(argv) {
   const p = parseArgs(argv, "sheet", ["--cols", "--width"]);
   const [outFile, ...images] = p.pos;
@@ -7068,15 +7069,15 @@ async function cmdFrames(argv) {
   const to = Number(str(p, "--to", v.duration));
   const fps = rate(v.avgFrameRate);
   const base2 = basenameNoExt(vid).replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = path8.join(WORK, "frames", base2);
-  mkdirSync4(dir, { recursive: true });
-  for (const f of readdirSync3(dir)) if (/^cell_.*\.png$/.test(f)) rmSync3(path8.join(dir, f), { force: true });
-  const sheet = abspath(str(p, "--out") || path8.join(WORK, "frames", base2 + "_sheet.png"));
+  const dir = path7.join(WORK, "frames", base2);
+  mkdirSync3(dir, { recursive: true });
+  for (const f of readdirSync3(dir)) if (/^cell_.*\.png$/.test(f)) rmSync3(path7.join(dir, f), { force: true });
+  const sheet = abspath(str(p, "--out") || path7.join(WORK, "frames", base2 + "_sheet.png"));
   const cells = [];
   for (let i2 = 0; i2 < n; i2++) {
     const t = (from + (to - from) * (i2 + 0.5) / n).toFixed(3);
     const sf = isNaN(fps) ? "?" : String(Math.floor(Number(t) * fps + 0.5));
-    const png = path8.join(dir, `cell_${String(i2).padStart(3, "0")}.png`);
+    const png = path7.join(dir, `cell_${String(i2).padStart(3, "0")}.png`);
     const r = run("ffmpeg", ["-v", "error", "-y", "-ss", t, "-i", vid, "-frames:v", "1", "-vf", `scale=${width}:-2`, "-update", "1", png], { stdio: ["ignore", "inherit", "inherit"] });
     if (r.status !== 0) die(`ffmpeg failed at t=${t}`);
     out(`${String(i2).padStart(2)}  t=${t}s  srcframe=${sf}`);
@@ -7085,6 +7086,122 @@ async function cmdFrames(argv) {
   makeSheet(sheet, int(p, "--cols", 4), width, cells);
   out("SHEET " + sheet);
   return 0;
+}
+function parseBox(spec, name) {
+  const v = spec.split(",").map(Number);
+  if (v.length !== 4 || v.some((n) => isNaN(n)) || v[2] <= 0 || v[3] <= 0) die(`${name} must be x,y,w,h (w and h > 0), got '${spec}'`);
+  return v;
+}
+var f1 = (n) => (Math.round(n * 10) / 10).toString();
+var hexOf = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase()).join("");
+var inkLine = (label, k) => `${label}: ink ${k.x0},${k.y0}..${k.x1},${k.y1}  ${k.x1 - k.x0 + 1}x${k.y1 - k.y0 + 1}  centre ${f1((k.x0 + k.x1 + 1) / 2)},${f1((k.y0 + k.y1 + 1) / 2)}  mean ${hexOf(k.mean)}  (bg ${k.bg})`;
+async function cmdMeasure(argv) {
+  const p = parseArgs(argv, "measure", ["--box", "--bg", "--threshold"]);
+  const [a, b] = p.pos;
+  if (!a || p.pos.length > 2) die("usage: ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB] [--threshold 24]");
+  const bgs = str(p, "--bg");
+  let bg;
+  if (bgs) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(bgs);
+    if (!m) die("--bg must be #RRGGBB");
+    bg = [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
+  }
+  const box = str(p, "--box") ? parseBox(str(p, "--box"), "--box") : void 0;
+  const threshold = int(p, "--threshold", 24);
+  for (const f of p.pos) if (!isFile(f)) die("no such file: " + f);
+  const ia = readRgba(a);
+  const ka = measureInk(ia, { bg, threshold, box });
+  out(ka ? inkLine(a, ka) : `${a}: no ink`);
+  if (!b) return 0;
+  const ib = readRgba(b);
+  const s = ia.w / ib.w;
+  const kb = measureInk(ib, { bg, threshold, box: box?.map((v) => v / s) });
+  out(kb ? inkLine(b, kb) : `${b}: no ink`);
+  if (!ka || !kb) return 0;
+  const c = (k, f) => [(k.x0 + k.x1 + 1) / 2 * f, (k.y0 + k.y1 + 1) / 2 * f, (k.x1 - k.x0 + 1) * f, (k.y1 - k.y0 + 1) * f];
+  const [ax, ay, aw, ah] = c(ka, 1);
+  const [bx, by, bw, bh] = c(kb, s);
+  const sg = (n) => (n >= 0 ? "+" : "") + f1(n);
+  out(`delta b-a${s !== 1 ? ` (b scaled x${f1(s)} to a's pixels)` : ""}: centre ${sg(bx - ax)},${sg(by - ay)}  size ${sg(bw - aw)}x${sg(bh - ah)}`);
+  return 0;
+}
+
+// src/commands/inspect.ts
+async function cmdDump(argv) {
+  const p = parseArgs(argv, "dump", ["--depth", "--layer", "--max-keys", "--at"], ["--no-keys", "--raw-text", "--props"]);
+  if (!p.pos.length) die('usage: ae dump "Comp Name" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]');
+  const comp = p.pos[p.pos.length - 1];
+  const layer = str(p, "--layer");
+  const raw = !!p.opts["--raw-text"];
+  const code = `log(AE.dump(AE.comp(${jsstr(comp)}), {depth: ${int(p, "--depth", 0)}, keys: ${!p.opts["--no-keys"]}, maxKeys: ${int(p, "--max-keys", 30)}, filter: ${layer ? jsstr(layer) : "null"}, rawText: ${raw}, at: ${p.opts["--at"] === void 0 ? "null" : int(p, "--at", 0)}, props: ${!!p.opts["--props"]}}));
+`;
+  return (await runSnippet("dump", "dump", code, { undo: raw, label: "ae dump" })).code;
+}
+async function cmdTree(argv) {
+  const main2 = argv[0] === "--main" && argv[1] !== void 0 ? jsstr(argv[1]) : "null";
+  return (await runSnippet("tree", "tree", `log(AE.tree(${main2}));
+`, { undo: false, label: "ae tree" })).code;
+}
+function parseFrames(spec) {
+  const res = [];
+  const bad = () => die(`bad frame list '${spec}' (use 8,44,90 or 10-100:10)`);
+  for (const part of spec.split(",")) {
+    const range = /^(\d+)-(\d+)(?::(\d+))?$/.exec(part);
+    if (range) {
+      const step = range[3] === void 0 ? 1 : +range[3];
+      if (step <= 0) die(`bad step in '${part}'`);
+      for (let f = +range[1]; f <= +range[2]; f += step) res.push(f);
+    } else if (/^\d+(\.\d+)?$/.test(part)) {
+      res.push(+part);
+    } else {
+      bad();
+    }
+  }
+  if (!res.length) bad();
+  return res;
+}
+async function cmdSnap(argv) {
+  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout", "--crop"], ["--sheet"]);
+  const [comp, spec] = p.pos;
+  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]');
+  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
+  const res = str(p, "--res", "half");
+  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
+  const frames = parseFrames(spec);
+  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
+  const dir = abspath(str(p, "--out") || path8.join(WORK, "snap", prefix));
+  mkdirSync4(dir, { recursive: true });
+  const code = `var c = AE.comp(${jsstr(comp)});
+log("SIZE " + c.width);
+AE.snap(c, [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});
+`;
+  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout: p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0 });
+  if (r.code) return r.code;
+  const cells = [];
+  const log = readLog(r.log).split("\n");
+  const compW = Number(log.find((l) => l.startsWith("SIZE "))?.slice(5));
+  for (const line of log) {
+    if (!line.startsWith("PNG ")) continue;
+    const file = line.slice(4);
+    if (crop) cropPng(file, crop, compW);
+    out(file);
+    const m = /_f(\d+)\.png$/.exec(file);
+    cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
+  }
+  if (p.opts["--sheet"] && cells.length) {
+    const sheet = path8.join(dir, prefix + "_sheet.png");
+    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), cells);
+    out("SHEET " + sheet);
+  }
+  return 0;
+}
+function cropPng(file, region, compW) {
+  const b = readFileSync3(file);
+  const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
+  const tmp = file.replace(/\.png$/, ".crop.png");
+  const r = run("ffmpeg", ["-v", "error", "-y", "-i", file, "-vf", cropFilter(region, compW > 0 ? w / compW : 1, w, h), "-frames:v", "1", "-update", "1", tmp], { stdio: ["ignore", "inherit", "inherit"] });
+  if (r.status !== 0) die(`ffmpeg could not crop ${file}`);
+  renameSync(tmp, file);
 }
 
 // src/commands/save.ts
@@ -7159,7 +7276,7 @@ function humanSize(n) {
 }
 
 // src/commands/script.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync3, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync4, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import path10 from "node:path";
 async function cmdRun(argv) {
   const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo", "--rollback"]);
@@ -7175,7 +7292,7 @@ async function cmdRun(argv) {
   let undo;
   if (p.opts["--ro"]) undo = false;
   else if (p.opts["--undo"]) undo = true;
-  else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync3(script, "utf8"));
+  else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync4(script, "utf8"));
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0;
   return runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: p.opts["--rollback"] === true });
 }
@@ -7210,7 +7327,7 @@ async function cmdUndo(argv) {
   let steps = p.pos;
   if (!steps.length) {
     try {
-      steps = JSON.parse(readFileSync3(UNDO_FILE, "utf8")).steps;
+      steps = JSON.parse(readFileSync4(UNDO_FILE, "utf8")).steps;
     } catch {
       die('undo: no undo step recorded; name one: ae undo "<step>" (the UNDO line of a run)');
     }
@@ -7227,7 +7344,7 @@ for (var i = S.length - 1; i >= 0; i--) {
 }
 
 // src/commands/setup.ts
-import { mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync5 } from "node:fs";
 import os from "node:os";
 import path11 from "node:path";
 async function cmdDoctor() {
@@ -7257,7 +7374,7 @@ async function cmdDoctor() {
   else warn(`'${app2}' not found in /Applications (set AE_APP to the app name)`);
   const prefs = prefsFile(app2);
   if (prefs) {
-    const text = readFileSync4(prefs, "utf8").replace(/\r/g, "\n");
+    const text = readFileSync5(prefs, "utf8").replace(/\r/g, "\n");
     const m = /"Pref_SCRIPTING_FILE_NETWORK_SECURITY" = "?(\d+)"?/.exec(text);
     if (m && Number(m[1]) === 1) ok(`scripts may write files (prefs ${path11.basename(prefs)})`);
     else if (m) fail(`scripts may not write files, so ae never sees the log. In AE: ${pref}`);
@@ -7346,7 +7463,7 @@ async function cmdSelftest(argv) {
 }
 async function cmdCompletion(argv) {
   if (argv[0] !== "zsh") die('usage: ae completion zsh   (then add  eval "$(ae completion zsh)"  to ~/.zshrc)');
-  process.stdout.write(readFileSync4(path11.join(TOOLS, "completions", "_ae"), "utf8"));
+  process.stdout.write(readFileSync5(path11.join(TOOLS, "completions", "_ae"), "utf8"));
   return 0;
 }
 async function cmdNames(argv) {
@@ -7369,13 +7486,13 @@ function looksLikeExtendScript(src) {
 async function cmdHook() {
   let input = {};
   try {
-    input = JSON.parse(readFileSync4(0, "utf8") || "{}");
+    input = JSON.parse(readFileSync5(0, "utf8") || "{}");
   } catch {
     return 0;
   }
   const file = input.tool_input?.file_path ?? "";
   if (!file.endsWith(".jsx") || file.includes(`${path11.sep}node_modules${path11.sep}`) || !isFile(file)) return 0;
-  const src = readFileSync4(file, "utf8").replace(/^﻿/, "");
+  const src = readFileSync5(file, "utf8").replace(/^﻿/, "");
   if (!looksLikeExtendScript(src)) return 0;
   const { errors, warnings } = check(src, path11.basename(file), LIB);
   if (errors.length) {
@@ -7397,8 +7514,9 @@ var USAGE2 = `ae - drive Adobe After Effects from the shell (macOS). See README.
   ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
   ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
-  ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols N] [--width px]
+  ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]
   ae sheet out.png a.png b.png ... [--cols N] [--width px]
+  ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB] [--threshold 24]   ink bounding box, centre, mean colour; b-a delta
   ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]
   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
@@ -7418,6 +7536,7 @@ var COMMANDS = {
   tree: cmdTree,
   snap: cmdSnap,
   sheet: cmdSheet,
+  measure: cmdMeasure,
   frames: cmdFrames,
   probe: cmdProbe,
   export: cmdExport,
