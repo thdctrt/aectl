@@ -11,6 +11,7 @@ _ae_names() {  # _ae_names <tag> <description> <ae _names args...>
   _wanted $tag expl $descr compadd -a names
 }
 _ae_comps() { _ae_names comps 'comp' comps; }
+_ae_comp_or_audio() { _alternative 'comps:comp:_ae_comps' 'files:audio file:_files -g "*.(#i)(wav|mp3|aif|aiff|m4a|aac|flac|mov|mp4)(-.)"'; }
 _ae_layers() {
   local comp=${(Q)line[1]}    # first positional argument, set by _arguments
   [[ -n $comp ]] && _ae_names layers 'layer' layers "$comp"
@@ -31,6 +32,7 @@ _ae() {
     'measure:ink bounding box of an image, or how far one is off from another'
     'frames:sample a video into a contact sheet'
     'probe:video size, fps, duration'
+    'beats:music accents in comp frames'
     'export:render a comp and encode it for YouTube, Reels, web, ProRes, GIF...'
     'save:save the open project'
     'doctor:check the setup'
@@ -91,6 +93,18 @@ _ae() {
         '1:output png:_files -g "*.png(-.)"' \
         '*:image:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \
         $sheetopts ;;
+    beats)
+      _arguments \
+        '1:comp or audio file:_ae_comp_or_audio' \
+        '--layer[the audio layer]:layer:_ae_layers' \
+        '--from[first comp frame]:frame:' \
+        '--to[last comp frame]:frame:' \
+        '--top[only the N strongest]:count:' \
+        '--min-gap[merge onsets closer than this, in frames]:frames:' \
+        '--threshold[drop onsets weaker than this share of the strongest]:0-1:' \
+        '--env[also loudness per frame]' \
+        '--fps[file only: comp frame rate]:fps:' \
+        '--offset[file only: comp frame where the file starts]:frame:' ;;
     measure)
       _arguments \
         '1:image:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \

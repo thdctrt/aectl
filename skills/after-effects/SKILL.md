@@ -67,6 +67,8 @@ ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB]       # ink bounding box
 ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]  # pick clip times
 ae probe video.mp4 [--fps 25]                                # size, fps (avg + r; flags VFR), duration, frames, audio;
                                                              # --fps: length in comp frames at that rate
+ae beats "Main" --layer "Music" [--from F --to F] [--top N] [--env]   # music accents in Main's frames (see below)
+ae beats music.wav [--fps 25] [--offset F] [...]                      # the same for a file that starts at frame F
 ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
@@ -89,6 +91,11 @@ ae selftest [--keep]                                         # 54 checks in a th
   Does nothing when there are no unsaved changes. `--status` only reports. `--backup` first copies the current .aep on
   disk to `<project dir>/Backups/<name>-YYYYmmdd-HHMMSS.aep`. `--as` saves to a new path, and AE keeps working on that
   new file afterwards, like Save As. Only save when the user asks you to: they may prefer to save themselves.
+- `beats`: onsets (hits, note attacks) found by spectral flux, one line each: comp frame, strength 0..1 (1 = the
+  strongest in the range), a bar. With `--layer` the file, start, stretch and in/out come from AE, so the frames are
+  the comp's own: key animation straight to them. `--top N` keeps the N strongest (downbeats, big hits),
+  `--min-gap F` (default 3) merges closer ones, `--threshold` (default 0.15) drops weaker ones, `--env` adds loudness
+  in dBFS per frame (swells, quiet parts). Time remapping on the layer is ignored (a note says so).
 - The combined file that actually ran is at `$TMPDIR/ae-tools/run/<name>.combined.jsx`.
 - `export`: AE renders a master (ProRes 422 HQ or Lossless; with alpha for alpha presets) through the render queue,
   then ffmpeg encodes the preset. Default range: the comp's work area. Default file: `./<comp>_<preset>.<ext>`; an

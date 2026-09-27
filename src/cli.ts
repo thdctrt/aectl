@@ -1,4 +1,5 @@
 // ae - drive Adobe After Effects from the shell (macOS). Entry point: dispatch to the commands.
+import { cmdBeats } from "./commands/beats.ts";
 import { cmdExport } from "./commands/export.ts";
 import { cmdDump, cmdSnap, cmdTree } from "./commands/inspect.ts";
 import { cmdFrames, cmdMeasure, cmdProbe, cmdSheet } from "./commands/media.ts";
@@ -18,6 +19,8 @@ export const USAGE = `ae - drive Adobe After Effects from the shell (macOS). See
   ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB] [--threshold 24]   ink bounding box, centre, mean colour; b-a delta
   ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]
   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
+  ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]
+  ae beats music.wav [--fps 25] [--offset F] [...]   accents (onsets) in comp frames; --env: loudness per frame
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
   ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
@@ -39,6 +42,7 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   measure: cmdMeasure,
   frames: cmdFrames,
   probe: cmdProbe,
+  beats: cmdBeats,
   export: cmdExport,
   save: cmdSave,
   doctor: cmdDoctor,

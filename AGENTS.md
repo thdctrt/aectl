@@ -8,7 +8,7 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 
 | path | what |
 |---|---|
-| `src/` | the CLI in TypeScript: `cli.ts` (dispatch, usage text), `commands/*.ts`, `lint.ts` (ExtendScript lint), `runner.ts` (osascript, logs, PNG waits), `media.ts` (ffmpeg) |
+| `src/` | the CLI in TypeScript: `cli.ts` (dispatch, usage text), `commands/*.ts`, `lint.ts` (ExtendScript lint), `runner.ts` (osascript, logs, PNG waits), `media.ts` (ffmpeg, image measuring), `audio.ts` (onset detection for `ae beats`) |
 | `dist/ae.mjs` | the bundled CLI, **generated** by `npm run build` and committed (the plugin installs from git without a build step). Never edit it by hand |
 | `ae` | launcher: checks the node version, then loads `dist/ae.mjs`. Plain old JS on purpose |
 | `lib.jsx` | ExtendScript library, everything under `AE`. `ae run` prepends it to every script |

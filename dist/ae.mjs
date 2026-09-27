@@ -1,9 +1,5 @@
 // Generated from src/ by npm run build. Do not edit.
 
-// src/commands/export.ts
-import { readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
-import path6 from "node:path";
-
 // src/util.ts
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
@@ -106,6 +102,135 @@ function int(p, name, dflt) {
   return parseInt(v, 10);
 }
 
+// src/audio.ts
+import { spawnSync as spawnSync2 } from "node:child_process";
+var SR = 22050;
+var N = 1024;
+var HOP = 256;
+function decodeMono(file, from = 0, dur) {
+  need("ffmpeg");
+  const args = ["-v", "error"];
+  if (from > 0) args.push("-ss", from.toFixed(3));
+  args.push("-i", file);
+  if (dur !== void 0) args.push("-t", dur.toFixed(3));
+  args.push("-vn", "-ac", "1", "-ar", String(SR), "-f", "f32le", "-");
+  const r = spawnSync2("ffmpeg", args, { maxBuffer: 1 << 30 });
+  if (r.status !== 0) die(`ffmpeg could not decode the audio of ${file}: ${r.stderr.toString().trim()}`);
+  const b = r.stdout;
+  return new Float32Array(b.buffer, b.byteOffset, Math.floor(b.length / 4));
+}
+function fft(re, im) {
+  const n = re.length;
+  for (let i2 = 1, j = 0; i2 < n; i2++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i2 < j) {
+      [re[i2], re[j]] = [re[j], re[i2]];
+      [im[i2], im[j]] = [im[j], im[i2]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i2 = 0; i2 < n; i2 += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i2 + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr;
+        im[b] = im[a] - ti;
+        re[a] += tr;
+        im[a] += ti;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = nr;
+      }
+    }
+  }
+}
+function onsets(input, o = {}) {
+  const x = new Float32Array(input.length + N);
+  x.set(input, N);
+  const frames = Math.max(0, Math.floor((x.length - N) / HOP) + 1);
+  if (frames < 3) return [];
+  const win = new Float64Array(N);
+  for (let i2 = 0; i2 < N; i2++) win[i2] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i2 / N);
+  const re = new Float64Array(N), im = new Float64Array(N);
+  let prev = new Float64Array(N / 2), cur = new Float64Array(N / 2);
+  const flux = new Float64Array(frames);
+  for (let f = 0; f < frames; f++) {
+    for (let i2 = 0; i2 < N; i2++) {
+      re[i2] = x[f * HOP + i2] * win[i2];
+      im[i2] = 0;
+    }
+    fft(re, im);
+    let s = 0;
+    for (let k = 0; k < N / 2; k++) {
+      cur[k] = Math.log1p(100 * Math.hypot(re[k], im[k]));
+      if (f > 0 && cur[k] > prev[k]) s += cur[k] - prev[k];
+    }
+    flux[f] = s;
+    [prev, cur] = [cur, prev];
+  }
+  const w = Math.round(0.25 * SR / HOP);
+  const nov = new Float64Array(frames);
+  let acc = 0, lo = 0, hi = -1;
+  for (let f = 0; f < frames; f++) {
+    while (hi < Math.min(frames - 1, f + w)) acc += flux[++hi];
+    while (lo < f - w) acc -= flux[lo++];
+    nov[f] = Math.max(0, flux[f] - acc / (hi - lo + 1));
+  }
+  let max = 0;
+  for (const v of nov) max = Math.max(max, v);
+  if (max <= 0) return [];
+  const gap = Math.max(1, Math.round((o.minGap ?? 0.1) * SR / HOP));
+  const th = (o.threshold ?? 0.15) * max;
+  const out2 = [];
+  for (let f = 1; f < frames; f++) {
+    if (nov[f] < th) continue;
+    let peak = true;
+    for (let g = Math.max(0, f - gap); g <= Math.min(frames - 1, f + gap) && peak; g++) {
+      if (nov[g] > nov[f] || nov[g] === nov[f] && g < f) peak = false;
+    }
+    if (peak) out2.push({ t: Math.max(0, attack(x, f) - N) / SR, strength: nov[f] / max });
+  }
+  return out2;
+}
+function attack(x, f) {
+  const B = 64, start = Math.max(B, f * HOP), end = Math.min(x.length - B, f * HOP + N + HOP);
+  const e = (i2) => {
+    let s = 1e-9;
+    for (let j = i2; j < i2 + B; j++) s += x[j] * x[j];
+    return Math.log(s);
+  };
+  let best = start, bestRise = -Infinity, prev = e(start - B);
+  for (let i2 = start; i2 <= end; i2 += B / 2) {
+    const cur = e(i2);
+    if (cur - prev > bestRise) {
+      bestRise = cur - prev;
+      best = i2;
+    }
+    prev = e(i2 - B / 2);
+  }
+  return best;
+}
+function loudness(x, step) {
+  const n = Math.max(1, Math.round(step * SR));
+  const out2 = [];
+  for (let i2 = 0; i2 + n <= x.length || i2 === 0 && x.length; i2 += n) {
+    let s = 0;
+    const end = Math.min(x.length, i2 + n);
+    for (let j = i2; j < end; j++) s += x[j] * x[j];
+    out2.push(10 * Math.log10(s / Math.max(1, end - i2) + 1e-12));
+  }
+  return out2;
+}
+
+// src/runner.ts
+import { closeSync, mkdirSync, openSync, readFileSync as readFileSync2, readSync, rmSync, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import path4 from "node:path";
+
 // src/env.ts
 import { readdirSync } from "node:fs";
 import path2 from "node:path";
@@ -155,231 +280,6 @@ function labelFont() {
   }
   return font;
 }
-
-// src/media.ts
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import path3 from "node:path";
-var safeLabel = (s) => s.replace(/[^A-Za-z0-9 ._#=+-]/g, "_");
-function makeSheet(outFile, cols, cellWidth, cells) {
-  need("ffmpeg");
-  need("ffprobe");
-  if (!cells.length) die("sheet: no images");
-  const probe = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", cells[0].file]);
-  const m = /^(\d+),(\d+)/.exec(probe.stdout.trim());
-  if (probe.status !== 0 || !m) die(`sheet: cannot read ${cells[0].file}`);
-  const w = +m[1];
-  const h = +m[2];
-  const ch = Math.floor((Math.floor(cellWidth * h / w) + 1) / 2) * 2;
-  const fs = Math.max(14, Math.floor(ch / 12));
-  const font2 = labelFont();
-  const inputs = [];
-  const filters = [];
-  const layout = [];
-  let stack = "";
-  cells.forEach((c, i2) => {
-    inputs.push("-i", c.file);
-    const dt = font2 ? `,drawtext=fontfile='${font2}':text='${safeLabel(c.label)}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=5` : "";
-    filters.push(`[${i2}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,pad=${cellWidth}:${ch}:(ow-iw)/2:(oh-ih)/2:color=black${dt}[v${i2}]`);
-    layout.push(`${i2 % cols * cellWidth}_${Math.floor(i2 / cols) * ch}`);
-    stack += `[v${i2}]`;
-  });
-  let fc;
-  if (cells.length === 1) fc = filters[0].replace(/\[v0\]$/, "[out]");
-  else fc = filters.join(";") + `;${stack}xstack=inputs=${cells.length}:layout=${layout.join("|")}:fill=black[out]`;
-  mkdirSync(path3.dirname(outFile), { recursive: true });
-  const r = run("ffmpeg", ["-v", "error", "-y", ...inputs, "-filter_complex", fc, "-map", "[out]", "-frames:v", "1", "-update", "1", outFile], { stdio: ["ignore", "inherit", "inherit"] });
-  if (r.status !== 0) die(`ffmpeg failed building ${outFile}`);
-}
-function probeVideo(file) {
-  const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name,pix_fmt:format=duration", "-of", "default=nw=1", file]);
-  const v = {};
-  for (const l of r.stdout.split("\n")) {
-    const i2 = l.indexOf("=");
-    if (i2 > 0) v[l.slice(0, i2)] = l.slice(i2 + 1);
-  }
-  return {
-    width: v.width ?? "",
-    height: v.height ?? "",
-    rFrameRate: v.r_frame_rate ?? "",
-    avgFrameRate: v.avg_frame_rate ?? "",
-    nbFrames: v.nb_frames ?? "",
-    codec: v.codec_name ?? "",
-    pixFmt: v.pix_fmt ?? "",
-    duration: v.duration ?? ""
-  };
-}
-function rate(r) {
-  const [a, b] = r.split("/").map(Number);
-  return b > 0 ? a / b : NaN;
-}
-function hasAudio(file) {
-  return run("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file]).stdout.trim() !== "";
-}
-function readRgba(file) {
-  need("ffmpeg");
-  need("ffprobe");
-  const probe = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", file]);
-  const m = /^(\d+),(\d+)/.exec(probe.stdout.trim());
-  if (probe.status !== 0 || !m) die(`cannot read image ${file}`);
-  const w = +m[1];
-  const h = +m[2];
-  const r = spawnSync2("ffmpeg", ["-v", "error", "-i", file, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { maxBuffer: w * h * 4 + 1024 });
-  if (r.status !== 0 || r.stdout.length < w * h * 4) die(`ffmpeg could not decode ${file}`);
-  return { w, h, px: r.stdout };
-}
-function measureInk(img, o = {}) {
-  const { w, h, px } = img;
-  const [bx, by, bw, bh] = o.box ?? [0, 0, w, h];
-  const X0 = Math.max(0, bx), Y0 = Math.max(0, by), X1 = Math.min(w, bx + bw), Y1 = Math.min(h, by + bh);
-  let alpha = false;
-  for (let i2 = 3; i2 < px.length; i2 += 4) if (px[i2] < 250) {
-    alpha = true;
-    break;
-  }
-  let bg = o.bg;
-  if (!alpha && !bg) {
-    const at2 = (x, y) => {
-      const i2 = (y * w + x) * 4;
-      return [px[i2], px[i2 + 1], px[i2 + 2]];
-    };
-    const cs = [at2(X0, Y0), at2(X1 - 1, Y0), at2(X0, Y1 - 1), at2(X1 - 1, Y1 - 1)];
-    const key = (c) => c.join(",");
-    const n = /* @__PURE__ */ new Map();
-    for (const c of cs) n.set(key(c), (n.get(key(c)) ?? 0) + 1);
-    bg = cs.reduce((a, c) => (n.get(key(c)) ?? 0) > (n.get(key(a)) ?? 0) ? c : a);
-  }
-  const t = o.threshold ?? 24;
-  let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1, count = 0, r = 0, g = 0, b = 0;
-  for (let y = Y0; y < Y1; y++) {
-    for (let x = X0; x < X1; x++) {
-      const i2 = (y * w + x) * 4;
-      const ink = alpha && !o.bg ? px[i2 + 3] > 8 : Math.max(Math.abs(px[i2] - bg[0]), Math.abs(px[i2 + 1] - bg[1]), Math.abs(px[i2 + 2] - bg[2])) > t;
-      if (!ink) continue;
-      count++;
-      r += px[i2];
-      g += px[i2 + 1];
-      b += px[i2 + 2];
-      if (x < x0) x0 = x;
-      if (x > x1) x1 = x;
-      if (y < y0) y0 = y;
-      if (y > y1) y1 = y;
-    }
-  }
-  if (!count) return null;
-  const hex = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase()).join("");
-  return { x0, y0, x1, y1, count, mean: [r / count, g / count, b / count], bg: alpha && !o.bg ? "transparent" : hex(bg) };
-}
-function cropFilter(region, scale, imgW, imgH) {
-  const [x, y, w, h] = region.map((v) => v * scale);
-  const X = Math.max(0, Math.min(imgW - 1, Math.round(x)));
-  const Y = Math.max(0, Math.min(imgH - 1, Math.round(y)));
-  const W = Math.max(1, Math.min(imgW - X, Math.round(w)));
-  const H = Math.max(1, Math.min(imgH - Y, Math.round(h)));
-  return `crop=${W}:${H}:${X}:${Y}`;
-}
-
-// src/presets.ts
-var H264 = ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p"];
-var AAC = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"];
-var FASTSTART = ["-movflags", "+faststart"];
-var PRESETS = [
-  { name: "youtube-1080", use: "YouTube / Vimeo, Full HD", ext: "mp4", width: 1920, height: 1080, video: H264, audio: AAC, container: FASTSTART },
-  { name: "youtube-4k", use: "YouTube / Vimeo, 4K UHD", ext: "mp4", width: 3840, height: 2160, video: H264, audio: AAC, container: FASTSTART },
-  { name: "shorts", aliases: ["reels", "tiktok"], use: "YouTube Shorts, Instagram Reels, TikTok (vertical 9:16)", ext: "mp4", width: 1080, height: 1920, video: H264, audio: AAC, container: FASTSTART },
-  { name: "square", use: "Instagram / social feed, 1:1", ext: "mp4", width: 1080, height: 1080, video: H264, audio: AAC, container: FASTSTART },
-  {
-    name: "web",
-    use: "small H.264 for sites, docs, chats (at most 1280 wide)",
-    ext: "mp4",
-    maxWidth: 1280,
-    video: ["-c:v", "libx264", "-preset", "slow", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p"],
-    audio: ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"],
-    container: FASTSTART
-  },
-  {
-    name: "prores",
-    use: "master for editing / delivery: ProRes 422 HQ at comp size",
-    ext: "mov",
-    video: ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le", "-vendor", "apl0"],
-    audio: ["-c:a", "pcm_s16le"]
-  },
-  {
-    name: "prores-alpha",
-    use: "master with transparency: ProRes 4444 + alpha at comp size",
-    ext: "mov",
-    alpha: true,
-    video: ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "apl0"],
-    audio: ["-c:a", "pcm_s16le"]
-  },
-  {
-    name: "webm-alpha",
-    use: "transparent video for web / UI: VP9 + alpha",
-    ext: "webm",
-    alpha: true,
-    video: ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30", "-b:v", "0", "-row-mt", "1"],
-    audio: ["-c:a", "libopus", "-b:a", "128k"]
-  },
-  { name: "gif", use: "animated GIF, 15 fps, at most 640 wide", ext: "gif", maxWidth: 640, fps: 15, gif: true, video: [], audio: null }
-];
-function findPreset(name) {
-  const n = name.toLowerCase();
-  return PRESETS.find((p) => p.name === n || p.aliases?.includes(n));
-}
-function presetNames() {
-  return PRESETS.flatMap((p) => [p.name, ...p.aliases ?? []]);
-}
-function listPresets() {
-  const w = Math.max(...PRESETS.map((p) => p.name.length));
-  return PRESETS.map((p) => {
-    const size = p.width ? `${p.width}x${p.height}` : p.maxWidth ? `<=${p.maxWidth}w` : "comp size";
-    const also = p.aliases ? `  (also: ${p.aliases.join(", ")})` : "";
-    return `${p.name.padEnd(w)}  ${size.padEnd(9)}  .${p.ext.padEnd(4)}  ${p.use}${also}`;
-  }).join("\n");
-}
-function aspectMismatch(p, inW, inH) {
-  if (!p.width || !p.height) return false;
-  return Math.abs(inW / inH - p.width / p.height) > 5e-3;
-}
-function videoFilter(p, inW, inH, fit) {
-  const f = [];
-  if (p.fps) f.push(`fps=${p.fps}`);
-  if (p.width && p.height) {
-    const W = p.width;
-    const H = p.height;
-    if (!aspectMismatch(p, inW, inH)) f.push(`scale=${W}:${H}:flags=lanczos`);
-    else if (fit === "crop") f.push(`scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos`, `crop=${W}:${H}`);
-    else f.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos`, `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black`);
-  } else if (p.maxWidth && inW > p.maxWidth) {
-    f.push(`scale=${p.maxWidth}:-2:flags=lanczos`);
-  } else {
-    f.push("scale=trunc(iw/2)*2:trunc(ih/2)*2");
-  }
-  f.push("setsar=1");
-  if (p.gif) return f.join(",") + ",split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5";
-  return f.join(",");
-}
-function ffmpegArgs(p, input, output, o) {
-  const audio = o.hasAudio && p.audio ? p.audio : ["-an"];
-  return [
-    "-v",
-    "error",
-    ...o.stats ? ["-stats"] : [],
-    "-y",
-    "-i",
-    input,
-    "-vf",
-    videoFilter(p, o.inW, o.inH, o.fit),
-    ...p.video,
-    ...audio,
-    ...p.container ?? [],
-    output
-  ];
-}
-
-// src/runner.ts
-import { closeSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync2, readSync, rmSync, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import path5 from "node:path";
 
 // node_modules/acorn/dist/acorn.mjs
 var astralIdentifierCodes = [509, 0, 227, 0, 150, 4, 294, 9, 1368, 2, 2, 1, 6, 3, 41, 2, 5, 0, 166, 1, 574, 3, 9, 9, 7, 9, 32, 4, 318, 1, 78, 5, 71, 10, 50, 3, 123, 2, 54, 14, 32, 10, 3, 1, 11, 3, 46, 10, 8, 0, 46, 9, 7, 2, 37, 13, 2, 9, 6, 1, 45, 0, 13, 2, 49, 13, 9, 3, 2, 11, 83, 11, 7, 0, 3, 0, 158, 11, 6, 9, 7, 3, 56, 1, 2, 6, 3, 1, 3, 2, 10, 0, 11, 1, 3, 6, 4, 4, 68, 8, 2, 0, 3, 0, 2, 3, 2, 4, 2, 0, 15, 1, 83, 17, 10, 9, 5, 0, 82, 19, 13, 9, 214, 6, 3, 8, 28, 1, 83, 16, 16, 9, 82, 12, 9, 9, 7, 19, 58, 14, 5, 9, 243, 14, 166, 9, 71, 5, 2, 1, 3, 3, 2, 0, 2, 1, 13, 9, 120, 6, 3, 6, 4, 0, 29, 9, 41, 6, 2, 3, 9, 0, 10, 10, 47, 15, 199, 7, 137, 9, 54, 7, 2, 7, 17, 9, 57, 21, 2, 13, 123, 5, 4, 0, 2, 1, 2, 6, 2, 0, 9, 9, 49, 4, 2, 1, 2, 4, 9, 9, 55, 9, 266, 3, 10, 1, 2, 0, 49, 6, 4, 4, 14, 10, 5350, 0, 7, 14, 11465, 27, 2343, 9, 87, 9, 39, 4, 60, 6, 26, 9, 535, 9, 470, 0, 2, 54, 8, 3, 82, 0, 12, 1, 19628, 1, 4178, 9, 519, 45, 3, 22, 543, 4, 4, 5, 9, 7, 3, 6, 31, 3, 149, 2, 1418, 49, 513, 54, 5, 49, 9, 0, 15, 0, 23, 4, 2, 14, 1361, 6, 2, 16, 3, 6, 2, 1, 2, 4, 101, 0, 161, 6, 10, 9, 357, 0, 62, 13, 499, 13, 245, 1, 2, 9, 233, 0, 3, 0, 8, 1, 6, 0, 475, 6, 110, 6, 6, 9, 4759, 9, 787719, 239];
@@ -6418,7 +6318,7 @@ base.MethodDefinition = base.PropertyDefinition = base.Property = function(node,
 
 // src/lint.ts
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
-import path4 from "node:path";
+import path3 from "node:path";
 import vm from "node:vm";
 var PRE = /^\s*(#|\/\/@)(include|includepath|target|targetengine|script|strict|engine)\b/;
 var INCLUDE = /^\s*(#|\/\/@)include\s+["']?([^"']+?)["']?\s*;?\s*$/;
@@ -6502,7 +6402,7 @@ function blankPreprocessor(src) {
 function lint(src, libPath) {
   const hasOtherIncludes = src.split("\n").some((l) => {
     const m = INCLUDE.exec(l);
-    return m !== null && path4.basename(m[2]) !== "lib.jsx";
+    return m !== null && path3.basename(m[2]) !== "lib.jsx";
   });
   const code = blankPreprocessor(src);
   let ast;
@@ -6715,18 +6615,18 @@ function check(src, label, libPath) {
 }
 function prep(input, output, libPath, showWarnings = true) {
   const src = readFileSync(input, "utf8").replace(/^﻿/, "");
-  const { errors, warnings } = check(src, path4.basename(input), libPath);
+  const { errors, warnings } = check(src, path3.basename(input), libPath);
   if (showWarnings) for (const w of warnings) process.stderr.write(w + "\n");
   if (errors.length) {
     for (const e of errors) process.stderr.write(e + "\n");
     return false;
   }
-  const dir = path4.dirname(path4.resolve(input));
+  const dir = path3.dirname(path3.resolve(input));
   const res = src.split("\n").map((l) => {
     const m = INCLUDE.exec(l);
     if (!m) return l;
-    const p = path4.isAbsolute(m[2]) ? m[2] : path4.resolve(dir, m[2]);
-    if (path4.basename(p) === "lib.jsx" && (p === libPath || exists(p) && realpathSync(p) === realpathSync(libPath))) return "";
+    const p = path3.isAbsolute(m[2]) ? m[2] : path3.resolve(dir, m[2]);
+    if (path3.basename(p) === "lib.jsx" && (p === libPath || exists(p) && realpathSync(p) === realpathSync(libPath))) return "";
     return '#include "' + p + '"';
   }).join("\n");
   writeFileSync(output, res);
@@ -6796,17 +6696,17 @@ async function waitPngs(timeoutSec, paths) {
     await sleep(300);
   }
 }
-var UNDO_FILE = path5.join(WORK, "undo.json");
+var UNDO_FILE = path4.join(WORK, "undo.json");
 async function runJsx(user, log, o) {
   need("osascript");
   if (!exists(LIB)) {
     err(`ae: lib.jsx not found next to ae (${LIB})`);
     return 2;
   }
-  mkdirSync2(path5.join(WORK, "run"), { recursive: true });
-  const base2 = path5.basename(user).replace(/\.jsx$/, "");
-  const prepped = path5.join(WORK, "run", base2 + ".prep.jsx");
-  const combined = path5.join(WORK, "run", base2 + ".combined.jsx");
+  mkdirSync(path4.join(WORK, "run"), { recursive: true });
+  const base2 = path4.basename(user).replace(/\.jsx$/, "");
+  const prepped = path4.join(WORK, "run", base2 + ".prep.jsx");
+  const combined = path4.join(WORK, "run", base2 + ".combined.jsx");
   if (!prep(user, prepped, LIB, !o.internal)) {
     err(`ae: ${user} failed the syntax/lint check; not run`);
     return 2;
@@ -6826,7 +6726,7 @@ AE._end();
 }catch(__e){var __f=new File(${jsstr(log)});__f.encoding="UTF-8";__f.lineFeed="Unix";__f.open("w");__f.write("ERR fatal (lib/wrapper): "+__e.message+" line "+__e.line+"\\n");__f.close();}
 `
   );
-  mkdirSync2(path5.dirname(log), { recursive: true });
+  mkdirSync(path4.dirname(log), { recursive: true });
   rmSync(log, { force: true });
   rmSync(log + ".part", { force: true });
   const r = run("osascript", ["-e", "on run argv", "-e", `tell application "${aeApp()}" to DoScriptFile (item 1 of argv)`, "-e", "end run", combined]);
@@ -6868,10 +6768,10 @@ AE._end();
   return failed ? 1 : 0;
 }
 async function runSnippet(dir, name, code, o) {
-  const d = path5.join(WORK, dir);
-  mkdirSync2(d, { recursive: true });
-  const f = path5.join(d, name + ".jsx");
-  const log = path5.join(d, name + ".log");
+  const d = path4.join(WORK, dir);
+  mkdirSync(d, { recursive: true });
+  const f = path4.join(d, name + ".jsx");
+  const log = path4.join(d, name + ".log");
   writeFileSync2(f, code);
   return { code: await runJsx(f, log, { internal: true, ...o }), log };
 }
@@ -6883,8 +6783,304 @@ function readLog(log) {
   }
 }
 
+// src/commands/beats.ts
+var USAGE = 'usage: ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]\n       ae beats file.wav [--fps 25] [--offset F] [...]   (no AE: the file starts at comp frame --offset)';
+function analyse(pl, o) {
+  const from = Math.max(o.from ?? pl.inF, pl.inF);
+  const to = Math.min(o.to ?? pl.outF, pl.outF);
+  if (!(to > from)) die(`beats: nothing to analyse between frames ${from} and ${to} (the audio spans ${pl.inF}..${pl.outF})`);
+  const srcFrom = Math.max(0, (from / pl.fps - pl.start) / pl.stretch);
+  const srcDur = (to - from) / pl.fps / pl.stretch;
+  const pre = Math.min(srcFrom, 0.5);
+  const x = decodeMono(pl.file, srcFrom - pre, srcDur + pre);
+  const toFrame = (t) => (pl.start + (srcFrom + t) * pl.stretch) * pl.fps;
+  const hits = onsets(x, { minGap: (o.minGap ?? 3) / pl.fps / pl.stretch, threshold: o.threshold }).map((h) => ({ frame: Math.round(toFrame(h.t - pre)), strength: h.strength })).filter((h) => h.frame >= from && h.frame < to);
+  const max = Math.max(0, ...hits.map((h) => h.strength));
+  for (const h of hits) h.strength = max > 0 ? h.strength / max : 0;
+  const body = x.subarray(Math.round(pre * SR));
+  const env = o.env ? loudness(body, 1 / pl.fps / pl.stretch).map((db, i2) => ({ frame: Math.round(toFrame(i2 / pl.fps / pl.stretch)), db })) : [];
+  return { from, to, hits, env };
+}
+async function cmdBeats(argv) {
+  const p = parseArgs(argv, "beats", ["--layer", "--from", "--to", "--fps", "--offset", "--top", "--min-gap", "--threshold"], ["--env"]);
+  const target = p.pos[0];
+  if (!target || p.pos.length > 1) die(USAGE);
+  const threshold = str(p, "--threshold") ? Number(str(p, "--threshold")) : void 0;
+  if (threshold !== void 0 && !(threshold > 0 && threshold < 1)) die("--threshold must be between 0 and 1");
+  const opt = (name) => p.opts[name] === void 0 ? void 0 : int(p, name, 0);
+  let pl;
+  let where;
+  if (!p.opts["--layer"]) {
+    if (!isFile(target)) die(`beats: no such file '${target}' (for a layer in AE: ae beats "Comp" --layer "Music")`);
+    const fps = str(p, "--fps") ? Number(str(p, "--fps")) : 25;
+    if (!(fps > 0)) die("--fps must be a number > 0");
+    const offset2 = int(p, "--offset", 0);
+    const dur = Number(run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", target]).stdout.trim());
+    if (!(dur > 0)) die(`beats: cannot read the length of ${target}`);
+    pl = { file: target, fps, start: offset2 / fps, stretch: 1, inF: offset2, outF: Math.round(offset2 + dur * fps) };
+    where = `frames at ${fps} fps, the file starting at frame ${offset2}`;
+  } else {
+    if (p.opts["--fps"] !== void 0 || p.opts["--offset"] !== void 0) die("beats: --fps/--offset are for a file; a layer's come from AE");
+    const code = `var c = AE.comp(${jsstr(target)}), L = AE.layer(c, ${jsstr(str(p, "--layer"))}), s = L.source;
+if (!s || !s.file) { throw new Error("layer '" + L.name + "' is not footage from a file"); }
+if (!L.hasAudio) { throw new Error("layer '" + L.name + "' has no audio"); }
+log("FILE " + s.file.fsName);
+log("PLACE " + [c.frameRate, L.startTime, L.stretch, L.inPoint, L.outPoint, L.timeRemapEnabled ? 1 : 0, L.audioEnabled ? 1 : 0].join(" "));
+`;
+    const r = await runSnippet("beats", "beats", code, { undo: false, label: "ae beats", quiet: true });
+    if (r.code) return r.code;
+    const log = readLog(r.log).split("\n");
+    const file = log.find((l) => l.startsWith("FILE "))?.slice(5) ?? "";
+    const [fps, start, stretch, inP, outP, remap, on] = (log.find((l) => l.startsWith("PLACE "))?.slice(6) ?? "").split(" ").map(Number);
+    if (!file || !(fps > 0)) die("beats: could not read the layer from AE");
+    if (!isFile(file)) die(`beats: the layer's file is missing on disk: ${file}`);
+    if (remap) err("ae: note: the layer has time remapping; frames assume it plays straight");
+    if (!on) err("ae: note: the layer's audio is switched off in the comp");
+    if (stretch < 0) die("beats: the layer is time-reversed (negative stretch)");
+    pl = { file, fps, start, stretch: stretch / 100, inF: Math.round(inP * fps), outF: Math.round(outP * fps) };
+    where = `frames of '${target}' (layer starts at ${Math.round(start * fps)}${stretch !== 100 ? `, stretch ${stretch}%` : ""})`;
+  }
+  const res = analyse(pl, { from: opt("--from"), to: opt("--to"), minGap: opt("--min-gap"), threshold, env: !!p.opts["--env"] });
+  let hits = res.hits;
+  const top = opt("--top");
+  if (top !== void 0) hits = [...hits].sort((a, b) => b.strength - a.strength).slice(0, top).sort((a, b) => a.frame - b.frame);
+  err(`ae: ${hits.length} onsets, ${where}, ${res.from}..${res.to}; strength 0..1 (1 = strongest here)`);
+  for (const h of hits) out(`${String(h.frame).padStart(6)}  ${h.strength.toFixed(2)}  ${"#".repeat(Math.max(1, Math.round(h.strength * 20)))}`);
+  if (p.opts["--env"]) {
+    const max = Math.max(...res.env.map((e) => e.db));
+    out("frame  dBFS  loudness");
+    for (const e of res.env) out(`${String(e.frame).padStart(6)}  ${e.db.toFixed(1).padStart(5)}  ${"=".repeat(Math.max(0, Math.round((e.db - max + 40) / 2)))}`);
+  }
+  return 0;
+}
+
 // src/commands/export.ts
-var USAGE = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--ame [--wait]]   (presets: ae export --list)';
+import { readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
+import path6 from "node:path";
+
+// src/media.ts
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { mkdirSync as mkdirSync2 } from "node:fs";
+import path5 from "node:path";
+var safeLabel = (s) => s.replace(/[^A-Za-z0-9 ._#=+-]/g, "_");
+function makeSheet(outFile, cols, cellWidth, cells) {
+  need("ffmpeg");
+  need("ffprobe");
+  if (!cells.length) die("sheet: no images");
+  const probe = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", cells[0].file]);
+  const m = /^(\d+),(\d+)/.exec(probe.stdout.trim());
+  if (probe.status !== 0 || !m) die(`sheet: cannot read ${cells[0].file}`);
+  const w = +m[1];
+  const h = +m[2];
+  const ch = Math.floor((Math.floor(cellWidth * h / w) + 1) / 2) * 2;
+  const fs = Math.max(14, Math.floor(ch / 12));
+  const font2 = labelFont();
+  const inputs = [];
+  const filters = [];
+  const layout = [];
+  let stack = "";
+  cells.forEach((c, i2) => {
+    inputs.push("-i", c.file);
+    const dt = font2 ? `,drawtext=fontfile='${font2}':text='${safeLabel(c.label)}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=5` : "";
+    filters.push(`[${i2}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,pad=${cellWidth}:${ch}:(ow-iw)/2:(oh-ih)/2:color=black${dt}[v${i2}]`);
+    layout.push(`${i2 % cols * cellWidth}_${Math.floor(i2 / cols) * ch}`);
+    stack += `[v${i2}]`;
+  });
+  let fc;
+  if (cells.length === 1) fc = filters[0].replace(/\[v0\]$/, "[out]");
+  else fc = filters.join(";") + `;${stack}xstack=inputs=${cells.length}:layout=${layout.join("|")}:fill=black[out]`;
+  mkdirSync2(path5.dirname(outFile), { recursive: true });
+  const r = run("ffmpeg", ["-v", "error", "-y", ...inputs, "-filter_complex", fc, "-map", "[out]", "-frames:v", "1", "-update", "1", outFile], { stdio: ["ignore", "inherit", "inherit"] });
+  if (r.status !== 0) die(`ffmpeg failed building ${outFile}`);
+}
+function probeVideo(file) {
+  const r = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,nb_frames,codec_name,pix_fmt:format=duration", "-of", "default=nw=1", file]);
+  const v = {};
+  for (const l of r.stdout.split("\n")) {
+    const i2 = l.indexOf("=");
+    if (i2 > 0) v[l.slice(0, i2)] = l.slice(i2 + 1);
+  }
+  return {
+    width: v.width ?? "",
+    height: v.height ?? "",
+    rFrameRate: v.r_frame_rate ?? "",
+    avgFrameRate: v.avg_frame_rate ?? "",
+    nbFrames: v.nb_frames ?? "",
+    codec: v.codec_name ?? "",
+    pixFmt: v.pix_fmt ?? "",
+    duration: v.duration ?? ""
+  };
+}
+function rate(r) {
+  const [a, b] = r.split("/").map(Number);
+  return b > 0 ? a / b : NaN;
+}
+function hasAudio(file) {
+  return run("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", file]).stdout.trim() !== "";
+}
+function readRgba(file) {
+  need("ffmpeg");
+  need("ffprobe");
+  const probe = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", file]);
+  const m = /^(\d+),(\d+)/.exec(probe.stdout.trim());
+  if (probe.status !== 0 || !m) die(`cannot read image ${file}`);
+  const w = +m[1];
+  const h = +m[2];
+  const r = spawnSync3("ffmpeg", ["-v", "error", "-i", file, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"], { maxBuffer: w * h * 4 + 1024 });
+  if (r.status !== 0 || r.stdout.length < w * h * 4) die(`ffmpeg could not decode ${file}`);
+  return { w, h, px: r.stdout };
+}
+function measureInk(img, o = {}) {
+  const { w, h, px } = img;
+  const [bx, by, bw, bh] = o.box ?? [0, 0, w, h];
+  const X0 = Math.max(0, bx), Y0 = Math.max(0, by), X1 = Math.min(w, bx + bw), Y1 = Math.min(h, by + bh);
+  let alpha = false;
+  for (let i2 = 3; i2 < px.length; i2 += 4) if (px[i2] < 250) {
+    alpha = true;
+    break;
+  }
+  let bg = o.bg;
+  if (!alpha && !bg) {
+    const at2 = (x, y) => {
+      const i2 = (y * w + x) * 4;
+      return [px[i2], px[i2 + 1], px[i2 + 2]];
+    };
+    const cs = [at2(X0, Y0), at2(X1 - 1, Y0), at2(X0, Y1 - 1), at2(X1 - 1, Y1 - 1)];
+    const key = (c) => c.join(",");
+    const n = /* @__PURE__ */ new Map();
+    for (const c of cs) n.set(key(c), (n.get(key(c)) ?? 0) + 1);
+    bg = cs.reduce((a, c) => (n.get(key(c)) ?? 0) > (n.get(key(a)) ?? 0) ? c : a);
+  }
+  const t = o.threshold ?? 24;
+  let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1, count = 0, r = 0, g = 0, b = 0;
+  for (let y = Y0; y < Y1; y++) {
+    for (let x = X0; x < X1; x++) {
+      const i2 = (y * w + x) * 4;
+      const ink = alpha && !o.bg ? px[i2 + 3] > 8 : Math.max(Math.abs(px[i2] - bg[0]), Math.abs(px[i2 + 1] - bg[1]), Math.abs(px[i2 + 2] - bg[2])) > t;
+      if (!ink) continue;
+      count++;
+      r += px[i2];
+      g += px[i2 + 1];
+      b += px[i2 + 2];
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (!count) return null;
+  const hex = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase()).join("");
+  return { x0, y0, x1, y1, count, mean: [r / count, g / count, b / count], bg: alpha && !o.bg ? "transparent" : hex(bg) };
+}
+function cropFilter(region, scale, imgW, imgH) {
+  const [x, y, w, h] = region.map((v) => v * scale);
+  const X = Math.max(0, Math.min(imgW - 1, Math.round(x)));
+  const Y = Math.max(0, Math.min(imgH - 1, Math.round(y)));
+  const W = Math.max(1, Math.min(imgW - X, Math.round(w)));
+  const H = Math.max(1, Math.min(imgH - Y, Math.round(h)));
+  return `crop=${W}:${H}:${X}:${Y}`;
+}
+
+// src/presets.ts
+var H264 = ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p"];
+var AAC = ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"];
+var FASTSTART = ["-movflags", "+faststart"];
+var PRESETS = [
+  { name: "youtube-1080", use: "YouTube / Vimeo, Full HD", ext: "mp4", width: 1920, height: 1080, video: H264, audio: AAC, container: FASTSTART },
+  { name: "youtube-4k", use: "YouTube / Vimeo, 4K UHD", ext: "mp4", width: 3840, height: 2160, video: H264, audio: AAC, container: FASTSTART },
+  { name: "shorts", aliases: ["reels", "tiktok"], use: "YouTube Shorts, Instagram Reels, TikTok (vertical 9:16)", ext: "mp4", width: 1080, height: 1920, video: H264, audio: AAC, container: FASTSTART },
+  { name: "square", use: "Instagram / social feed, 1:1", ext: "mp4", width: 1080, height: 1080, video: H264, audio: AAC, container: FASTSTART },
+  {
+    name: "web",
+    use: "small H.264 for sites, docs, chats (at most 1280 wide)",
+    ext: "mp4",
+    maxWidth: 1280,
+    video: ["-c:v", "libx264", "-preset", "slow", "-crf", "23", "-profile:v", "high", "-pix_fmt", "yuv420p"],
+    audio: ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"],
+    container: FASTSTART
+  },
+  {
+    name: "prores",
+    use: "master for editing / delivery: ProRes 422 HQ at comp size",
+    ext: "mov",
+    video: ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le", "-vendor", "apl0"],
+    audio: ["-c:a", "pcm_s16le"]
+  },
+  {
+    name: "prores-alpha",
+    use: "master with transparency: ProRes 4444 + alpha at comp size",
+    ext: "mov",
+    alpha: true,
+    video: ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-vendor", "apl0"],
+    audio: ["-c:a", "pcm_s16le"]
+  },
+  {
+    name: "webm-alpha",
+    use: "transparent video for web / UI: VP9 + alpha",
+    ext: "webm",
+    alpha: true,
+    video: ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30", "-b:v", "0", "-row-mt", "1"],
+    audio: ["-c:a", "libopus", "-b:a", "128k"]
+  },
+  { name: "gif", use: "animated GIF, 15 fps, at most 640 wide", ext: "gif", maxWidth: 640, fps: 15, gif: true, video: [], audio: null }
+];
+function findPreset(name) {
+  const n = name.toLowerCase();
+  return PRESETS.find((p) => p.name === n || p.aliases?.includes(n));
+}
+function presetNames() {
+  return PRESETS.flatMap((p) => [p.name, ...p.aliases ?? []]);
+}
+function listPresets() {
+  const w = Math.max(...PRESETS.map((p) => p.name.length));
+  return PRESETS.map((p) => {
+    const size = p.width ? `${p.width}x${p.height}` : p.maxWidth ? `<=${p.maxWidth}w` : "comp size";
+    const also = p.aliases ? `  (also: ${p.aliases.join(", ")})` : "";
+    return `${p.name.padEnd(w)}  ${size.padEnd(9)}  .${p.ext.padEnd(4)}  ${p.use}${also}`;
+  }).join("\n");
+}
+function aspectMismatch(p, inW, inH) {
+  if (!p.width || !p.height) return false;
+  return Math.abs(inW / inH - p.width / p.height) > 5e-3;
+}
+function videoFilter(p, inW, inH, fit) {
+  const f = [];
+  if (p.fps) f.push(`fps=${p.fps}`);
+  if (p.width && p.height) {
+    const W = p.width;
+    const H = p.height;
+    if (!aspectMismatch(p, inW, inH)) f.push(`scale=${W}:${H}:flags=lanczos`);
+    else if (fit === "crop") f.push(`scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos`, `crop=${W}:${H}`);
+    else f.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos`, `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black`);
+  } else if (p.maxWidth && inW > p.maxWidth) {
+    f.push(`scale=${p.maxWidth}:-2:flags=lanczos`);
+  } else {
+    f.push("scale=trunc(iw/2)*2:trunc(ih/2)*2");
+  }
+  f.push("setsar=1");
+  if (p.gif) return f.join(",") + ",split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5";
+  return f.join(",");
+}
+function ffmpegArgs(p, input, output, o) {
+  const audio = o.hasAudio && p.audio ? p.audio : ["-an"];
+  return [
+    "-v",
+    "error",
+    ...o.stats ? ["-stats"] : [],
+    "-y",
+    "-i",
+    input,
+    "-vf",
+    videoFilter(p, o.inW, o.inH, o.fit),
+    ...p.video,
+    ...audio,
+    ...p.container ?? [],
+    output
+  ];
+}
+
+// src/commands/export.ts
+var USAGE2 = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--ame [--wait]]   (presets: ae export --list)';
 var RENDER_TIMEOUT = 3600;
 async function cmdExport(argv) {
   const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list"]);
@@ -6892,7 +7088,7 @@ async function cmdExport(argv) {
     out(listPresets());
     return 0;
   }
-  if (p.pos.length !== 1) die(USAGE);
+  if (p.pos.length !== 1) die(USAGE2);
   const comp = p.pos[0];
   const presetName = str(p, "--preset", "youtube-1080");
   const preset = findPreset(presetName) ?? die(`unknown preset '${presetName}'; one of: ${presetNames().join(", ")}`);
@@ -7508,7 +7704,7 @@ async function cmdHook() {
 }
 
 // src/cli.ts
-var USAGE2 = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
+var USAGE3 = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
   ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]
   ae undo ["step" ...]            take back the last run's undo steps (or the named ones), only while they are AE's last
   ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
@@ -7519,6 +7715,8 @@ var USAGE2 = `ae - drive Adobe After Effects from the shell (macOS). See README.
   ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB] [--threshold 24]   ink bounding box, centre, mean colour; b-a delta
   ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]
   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
+  ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]
+  ae beats music.wav [--fps 25] [--offset F] [...]   accents (onsets) in comp frames; --env: loudness per frame
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
   ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
@@ -7539,6 +7737,7 @@ var COMMANDS = {
   measure: cmdMeasure,
   frames: cmdFrames,
   probe: cmdProbe,
+  beats: cmdBeats,
   export: cmdExport,
   save: cmdSave,
   doctor: cmdDoctor,
@@ -7550,22 +7749,22 @@ var COMMANDS = {
 async function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === void 0) {
-    process.stdout.write(USAGE2);
+    process.stdout.write(USAGE3);
     return 2;
   }
   if (cmd === "-h" || cmd === "--help" || cmd === "help") {
-    process.stdout.write(USAGE2);
+    process.stdout.write(USAGE3);
     return 0;
   }
   const fn = COMMANDS[cmd];
   if (!fn) {
     err(`ae: unknown command '${cmd}'`);
-    process.stdout.write(USAGE2);
+    process.stdout.write(USAGE3);
     return 2;
   }
   if (rest.includes("--help") || rest.includes("-h")) {
-    const lines = USAGE2.split("\n").filter((l) => new RegExp(`\\bae ${cmd}\\b`).test(l));
-    process.stdout.write((lines.length ? lines : USAGE2.split("\n").slice(0, 1)).join("\n") + "\n");
+    const lines = USAGE3.split("\n").filter((l) => new RegExp(`\\bae ${cmd}\\b`).test(l));
+    process.stdout.write((lines.length ? lines : USAGE3.split("\n").slice(0, 1)).join("\n") + "\n");
     return 0;
   }
   try {
@@ -7588,6 +7787,6 @@ main(process.argv.slice(2)).then(
   }
 );
 export {
-  USAGE2 as USAGE,
+  USAGE3 as USAGE,
   main
 };
