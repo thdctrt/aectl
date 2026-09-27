@@ -24,6 +24,13 @@ describe("cli", () => {
     expect(ae([]).code).toBe(2);
   });
 
+  it("--help after a command prints its usage lines", () => {
+    const r = ae(["dump", "--help"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^  ae dump "Comp"/);
+    expect(ae(["check", "-h"]).out).toContain("ae check script.jsx");
+  });
+
   it("rejects an unknown command", () => {
     const r = ae(["frobnicate"]);
     expect(r.code).toBe(2);

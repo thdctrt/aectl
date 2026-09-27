@@ -98,7 +98,7 @@ full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent h
 | command | what |
 |---|---|
 | `ae run script.jsx` | lint, run as one undo step, print the log, wait for PNGs; exit 1 on `ERR` |
-| `ae eval 'js'` | run a one-liner; an expression's value is printed |
+| `ae eval 'js'` | run a one-liner; the value of the last expression is printed |
 | `ae check script.jsx` | syntax + ExtendScript lint only, no AE needed |
 | `ae tree` / `ae dump "Comp"` | project overview / one comp in detail (read-only) |
 | `ae snap "Comp" 0-90:15 --sheet` | render frames to PNG, optionally as a contact sheet |

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs, str } from "../args.ts";
 import { LIB, TOOLS, WORK } from "../env.ts";
-import { isExpr, prep } from "../lint.ts";
+import { evalScript, prep } from "../lint.ts";
 import { runJsx } from "../runner.ts";
 import { abspath, die, isFile, out } from "../util.ts";
 
@@ -31,11 +31,11 @@ export async function cmdRun(argv: string[]): Promise<number> {
 export async function cmdEval(argv: string[]): Promise<number> {
   const undo = !argv.includes("--ro");
   const code = argv.filter((a) => a !== "--ro").join("\n");
-  if (!code) die("usage: ae eval 'js code' [--ro]   (an expression's value is logged)");
+  if (!code) die("usage: ae eval 'js code' [--ro]   (the value of the last expression is logged)");
   const dir = path.join(WORK, "eval");
   mkdirSync(dir, { recursive: true });
   const f = path.join(dir, "eval.jsx");
-  writeFileSync(f, isExpr(code) ? `var __r = (${code}\n);\nif (__r !== undefined) { log(__r); }\n` : code + "\n");
+  writeFileSync(f, evalScript(code));
   return runJsx(f, path.join(dir, "eval.log"), { undo, label: "ae eval" });
 }
 

@@ -213,6 +213,8 @@ export function lint(src: string, libPath?: string): Finding[] {
         return;
       case "BinaryExpression":
         if (n.operator === "**") at(n, "error", "** (ES2016): use Math.pow(a, b)");
+        else if (n.operator === "+" && ((isStringy(n.left) && isVector(n.right)) || (isStringy(n.right) && isVector(n.left))))
+          at(n, "warning", '"text" + an array value throws "invalid numeric result" in ExtendScript (+ is overloaded for arrays): use AE.str(v) or v.join(",")');
         return;
       case "LogicalExpression":
         if (n.operator === "??") at(n, "error", "?? (ES2020): use (x !== undefined && x !== null ? x : y)");
@@ -298,6 +300,39 @@ export function lint(src: string, libPath?: string): Finding[] {
     .sort((a, b) => a.line - b.line || (a.level === b.level ? 0 : a.level === "error" ? -1 : 1));
 }
 
+/** A string literal, or a + chain that contains one. */
+function isStringy(n: Node): boolean {
+  if (n.type === "Literal") return typeof n.value === "string";
+  return n.type === "BinaryExpression" && n.operator === "+" && (isStringy(n.left) || isStringy(n.right));
+}
+
+// Properties whose value is always an array: transform vectors, shape sizes/positions, colours.
+const VECTOR_PROPS = new Set(["position", "anchorPoint", "scale", "orientation", "pointOfInterest"]);
+const VECTOR_TF = new Set(["pos", "position", "anchor", "anchorPoint", "scale", "ADBE Position", "ADBE Anchor Point", "ADBE Scale"]);
+const VECTOR_NAME = /^(ADBE (Position|Anchor Point|Scale|Orientation)|Position|Anchor Point|Scale|Color)$|(Rect|Ellipse|Star) (Size|Position)$|Color$/i;
+const VECTOR_TEXT = new Set(["fillColor", "strokeColor", "boxTextSize", "boxTextPos"]);
+
+/** An expression that reads one of those properties' values (`.value`, `.valueAtTime()`, `.keyValue()`), or a TextDocument colour/box. */
+function isVector(n: Node): boolean {
+  if (n.type === "MemberExpression" && !n.computed) {
+    if (VECTOR_TEXT.has(n.property.name)) return true;
+    return n.property.name === "value" && isVectorProp(n.object);
+  }
+  if (n.type === "CallExpression" && n.callee.type === "MemberExpression" && !n.callee.computed)
+    return (n.callee.property.name === "valueAtTime" || n.callee.property.name === "keyValue") && isVectorProp(n.callee.object);
+  return false;
+}
+
+function isVectorProp(n: Node): boolean {
+  if (n.type === "MemberExpression" && !n.computed) return VECTOR_PROPS.has(n.property.name);
+  if (n.type !== "CallExpression" || n.callee.type !== "MemberExpression" || n.callee.computed) return false;
+  const arg = n.arguments[n.arguments.length - 1];
+  if (!arg || arg.type !== "Literal" || typeof arg.value !== "string") return false;
+  const fn: string = n.callee.property.name;
+  if (fn === "tf") return VECTOR_TF.has(arg.value);
+  return (fn === "property" || fn === "findProp") && VECTOR_NAME.test(arg.value) && !/^[XYZ] Position$/i.test(arg.value);
+}
+
 function isArrayish(n: Node): boolean {
   if (n.type === "ArrayExpression") return true;
   if (n.type === "NewExpression" && n.callee.type === "Identifier" && n.callee.name === "Array") return true;
@@ -353,4 +388,25 @@ export function isExpr(code: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The script `ae eval` runs. Like a REPL, it logs the value of a single expression, or of the last statement when
+ * that is an expression or a top-level `return x` (the runner wraps the code in a function). Line numbers are kept.
+ */
+export function evalScript(code: string): string {
+  const show = (expr: string) => `var __r = (${expr}); if (__r !== undefined) { log(__r); }`;
+  if (isExpr(code)) return show(code + "\n") + "\n";
+  let body: Node[];
+  try {
+    body = (acorn.parse(code, { ecmaVersion: "latest", allowReturnOutsideFunction: true }) as Node).body;
+  } catch {
+    return code + "\n"; // the lint reports the syntax error
+  }
+  const last = body[body.length - 1];
+  let expr: Node | null = null;
+  if (last?.type === "ExpressionStatement" && !last.directive) expr = last.expression;
+  else if (last?.type === "ReturnStatement" && last.argument) expr = last.argument;
+  if (!expr) return code + "\n";
+  return code.slice(0, last.start) + show(code.slice(expr.start, expr.end)) + code.slice(last.end) + "\n";
 }

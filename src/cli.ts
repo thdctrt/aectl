@@ -60,6 +60,11 @@ export async function main(argv: string[]): Promise<number> {
     process.stdout.write(USAGE);
     return 2;
   }
+  if (rest.includes("--help") || rest.includes("-h")) {
+    const lines = USAGE.split("\n").filter((l) => new RegExp(`\\bae ${cmd}\\b`).test(l));
+    process.stdout.write((lines.length ? lines : USAGE.split("\n").slice(0, 1)).join("\n") + "\n");
+    return 0;
+  }
   try {
     return await fn(rest);
   } catch (e) {

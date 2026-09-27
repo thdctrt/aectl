@@ -50,8 +50,8 @@ AE.run("Retime intro", function (log) {          // one Cmd+Z step, dialogs supp
 ```
 ae run script.jsx [--log file] [--ro|--undo] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
 ae check script.jsx [more.jsx ...]                           # syntax + ExtendScript lint only (no AE needed)
-ae eval 'AE.comp("Logo").numLayers' [--ro]                   # expression -> value is logged
-ae eval 'var c=AE.comp("Logo"); log(c.duration);' --ro       # statements -> use log()
+ae eval 'AE.comp("Logo").numLayers' [--ro]                   # the value of the last expression is logged
+ae eval 'var c=AE.comp("Logo"); c.duration' --ro             # (or of a top-level `return x`); no IIFE needed
 ae dump "Main" [--depth 1] [--layer "Title"] [--no-keys] [--max-keys N] [--raw-text]
 ae tree [--main "Main"]                                      # all comps (folder, size, fps, dur) + layers of --main (default: active comp)
 ae snap "Main" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--sheet] [--cols 4] [--width 640]
@@ -73,6 +73,7 @@ ae selftest [--keep]                                         # 42 checks in a th
 - Env: `AE_TIMEOUT` (log wait, default 300 s), `AE_SNAP_TIMEOUT` (PNG wait, default 60 s), `AE_TMP` (work dir,
   default `$TMPDIR`), `AE_DEBUG=1` (PNG wait timing), `AE_APP` (app name; default: the running AE, else the newest one in /Applications).
 - Exit codes: 0 ok, 1 ERR logged, 2 usage/syntax/lint, 3 AE not running / timeout (a modal dialog in AE is the usual cause).
+- `ae <command> --help` prints that command's usage.
 - `save`: prints the project path and whether it has unsaved changes, then saves with AE's own Save (not undoable).
   Does nothing when there are no unsaved changes. `--status` only reports. `--backup` first copies the current .aep on
   disk to `<project dir>/Backups/<name>-YYYYmmdd-HHMMSS.aep`. `--as` saves to a new path, and AE keeps working on that
@@ -180,7 +181,7 @@ name or numeric id.
 ## Pitfalls (all handled by the lib/CLI; keep them in mind for raw code)
 
 1. **`"x" + array` throws** ("invalid numeric result") because this engine overloads `+` for arrays. Use `AE.str(v)`,
-   `String(arr)` or `arr.join(",")`. `log()` already does this.
+   `String(arr)` or `arr.join(",")`. `log()` already does this, and the lint warns about `"x" + L.transform.position.value`.
 2. **Never call `app.executeCommand`**. The lint refuses it.
 3. **Wrap mutations**: suppress dialogs, one undo group, try/catch logging `message` + line. This is `AE.run`, and
    `ae run` adds it automatically.
@@ -224,7 +225,7 @@ checked right away by a hook; otherwise run `ae check file.jsx` yourself. The ru
   reserved words as unquoted object keys (`{in: 1}`: write `{"in": 1}`), `app.executeCommand`, and **unknown `AE.*`
   members** (`AE.setTxt` gets "did you mean AE.setText?").
 - Warnings (they fail at runtime): `[].forEach/map/filter/...`, `[].indexOf`, `"".trim/startsWith/...`, `.bind`,
-  `Object.keys` & co, `Array.isArray`, and **`JSON`, which is undefined** (use `AE.str(v)`). Also `const` (reassignment is
+  `Object.keys` & co, `Array.isArray`, **`JSON`, which is undefined** (use `AE.str(v)`), and `"text" + <array value>` (pitfall 1). Also `const` (reassignment is
   silently ignored), `app.project.save/close`, and reserved words after a dot (`o.in` works in AE 2026, not in older versions).
 - Fine: trailing commas, `o["in"]`, `let`/`yield` as plain names, `Date.now`.
 

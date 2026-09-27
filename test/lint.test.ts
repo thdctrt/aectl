@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { aeMembers, check, isExpr, lint, prep } from "../src/lint.ts";
+import { aeMembers, check, evalScript, isExpr, lint, prep } from "../src/lint.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const LIB = path.join(ROOT, "lib.jsx");
@@ -70,6 +70,31 @@ describe("matches what AE 2026 ExtendScript accepts", () => {
 
   it("only warns about const outside a for header", () => {
     expect(levels("const c = 1;")).toEqual(["warning"]);
+  });
+});
+
+describe('"text" + an array value (pitfall 1)', () => {
+  it.each([
+    ["position", '"p " + L.transform.position.value'],
+    ["anchorPoint at a time", 'L.transform.anchorPoint.valueAtTime(1, false) + " a"'],
+    ["AE.tf pos", '"p " + AE.tf(L, "pos").value'],
+    ["rect size by matchName", '"s=" + r.property("ADBE Vector Rect Size").value'],
+    ["fill colour by matchName", '"f " + g.property("ADBE Vector Fill Color").value'],
+    ["key value of scale", '"k " + L.transform.scale.keyValue(1)'],
+    ["TextDocument fill", '"c " + d.fillColor'],
+    ["inside a longer chain", 'var s = "a" + L.name + " pos " + L.transform.position.value + "!";'],
+  ])("warns for %s", (_name, src) => {
+    expect(warningsOf(src).map((f) => f.msg)).toEqual([expect.stringContaining("invalid numeric result")]);
+  });
+
+  it.each([
+    ["opacity", '"o " + L.transform.opacity.value'],
+    ["X Position (one dimension)", '"x " + L.property("X Position").value'],
+    ["AE.str", '"p " + AE.str(L.transform.position.value)'],
+    ["join", '"p " + L.transform.position.value.join(",")'],
+    ["number maths", "var y = L.transform.position.value[1] + 10;"],
+  ])("stays quiet for %s", (_name, src) => {
+    expect(warningsOf(src)).toEqual([]);
   });
 });
 
@@ -183,5 +208,16 @@ describe("check / prep", () => {
     expect(isExpr('AE.comp("Main").numLayers')).toBe(true);
     expect(isExpr("1 + 2")).toBe(true);
     expect(isExpr("var c = 1; log(c);")).toBe(false);
+  });
+
+  it("ae eval logs the last expression or top-level return, keeping line numbers", () => {
+    const show = (e: string) => `var __r = (${e}); if (__r !== undefined) { log(__r); }`;
+    expect(evalScript("1 + 2")).toBe(show("1 + 2\n") + "\n");
+    expect(evalScript('var c = AE.comp("Main");\nc.numLayers')).toBe('var c = AE.comp("Main");\n' + show("c.numLayers") + "\n");
+    expect(evalScript("var o = [];\no.push(1);\nreturn o.join(\",\");")).toBe("var o = [];\no.push(1);\n" + show('o.join(",")') + "\n");
+    expect(evalScript("var c = 1; log(c);")).toBe("var c = 1; " + show("log(c)") + "\n");
+    expect(evalScript("var c = 1;")).toBe("var c = 1;\n");
+    expect(evalScript("for (;;) { break; }")).toBe("for (;;) { break; }\n");
+    expect(evalScript("var = ;")).toBe("var = ;\n"); // left to the lint
   });
 });
