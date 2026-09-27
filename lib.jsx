@@ -344,13 +344,18 @@ var AE = (function () {
         if (parent) { f.parentFolder = parent; }
         return f;
     };
-    // FootageItem for a file path (matched by file.fsName); imported if missing (into folder if given)
-    A.footage = function (path, folder) {
+    // FootageItem for a file path (matched by file.fsName); imported if missing (into folder if given).
+    // o.reload: an existing item re-reads the file (after it was re-encoded or re-exported on disk).
+    A.footage = function (path, folder, o) {
         var file = new File(path);
         if (!file.exists) { throw new Error("file not found: " + path); }
         var all = A.items(FootageItem);
         for (var i = 0; i < all.length; i++) {
-            if (all[i].file && all[i].file.fsName === file.fsName) { A.lastImported = false; return all[i]; }
+            if (all[i].file && all[i].file.fsName === file.fsName) {
+                A.lastImported = false;
+                if (o && o.reload) { all[i].mainSource.reload(); }
+                return all[i];
+            }
         }
         var it = app.project.importFile(new ImportOptions(file));
         if (folder) { it.parentFolder = A.folder(folder); }
@@ -548,7 +553,21 @@ var AE = (function () {
     // Set a key at comp frame `frame`. value: hex strings accepted for colour props.
     // opts: interp "linear"|"bezier"|"hold" or [in,out]; ease: influence% or [in%,out%] (speed 0);
     //       like: [srcProp, srcKeyIndex] to copy interpolation+ease. Returns the key index.
+    //   List form: AE.key(prop, [[frame, value, opts|ease?], ...], opts) sets several keys; a row's third element is
+    //   its own opts (merged over the shared ones) or just its ease. Returns the key indexes.
     A.key = function (prop, frame, value, opts) {
+        if (frame instanceof Array) {
+            var rows = frame, shared = value || {}, idx = [];
+            for (var r = 0; r < rows.length; r++) {
+                var o2 = {}, own = rows[r][2], kk;
+                for (kk in shared) { if (shared.hasOwnProperty(kk)) { o2[kk] = shared[kk]; } }
+                if (own !== undefined && own !== null && typeof own === "object" && !(own instanceof Array)) {
+                    for (kk in own) { if (own.hasOwnProperty(kk)) { o2[kk] = own[kk]; } }
+                } else if (own !== undefined) { o2.ease = own; }
+                idx.push(A.key(prop, rows[r][0], rows[r][1], o2));
+            }
+            return idx;
+        }
         opts = opts || {};
         if (typeof value === "string" && prop.propertyValueType === PropertyValueType.COLOR) { value = A.hex(value, true); }
         var t = frame * A.fd(prop);
@@ -604,8 +623,8 @@ var AE = (function () {
     //     mute:true (audio off), name:"..."|true (true = item name), cover:true|{...AE.cover opts}}
     A.replaceFootage = function (L, pathOrItem, o) {
         o = o || {};
-        var item = (typeof pathOrItem === "string") ? A.footage(pathOrItem, o.folder) : pathOrItem;
-        L.replaceSource(item, false);
+        var item = (typeof pathOrItem === "string") ? A.footage(pathOrItem, o.folder, { reload: o.reload }) : pathOrItem;
+        swapSource(L, item);
         if (o.name === true) { L.name = item.name; } else if (o.name) { L.name = o.name; }
         if (o.anchor) { A.set(A.tf(L, "anchor"), o.anchor); }
         if (o.scale !== undefined) { A.set(A.tf(L, "scale"), o.scale); }
@@ -616,6 +635,17 @@ var AE = (function () {
         if (o.cover) { A.cover(L, o.cover === true ? {} : o.cover); }
         return L;
     };
+
+    // replaceSource that keeps the layer's in/out. A layer that ran to the end of its old source runs to the end of
+    // the new one (AE otherwise keeps the old out point, so a longer source is cut off).
+    function swapSource(L, item) {
+        var fd = A.fd(L), st = L.stretch ? L.stretch / 100 : 1, old = L.source;
+        var full = old && old.duration && Math.abs(L.outPoint - (L.startTime + old.duration * st)) < fd / 2;
+        var inP = L.inPoint, outP = L.outPoint;
+        L.replaceSource(item, false);
+        if (full && item.duration) { outP = L.startTime + item.duration * st; }
+        if (Math.abs(L.outPoint - outP) > fd / 4 || Math.abs(L.inPoint - inP) > fd / 4) { A.trim(L, inP / fd, outP / fd); }
+    }
 
     // Scale a layer to the minimum that fills the comp (x zoom) and clamp position so no edge shows.
     // o: {zoom:1, scale:minScale% (use max(this,min)), anchor:[x,y], pos:[x,y] desired position,
@@ -656,6 +686,209 @@ var AE = (function () {
         if (p.length > 2) { np.push(p[2]); }
         A.set(pp, np);
         return { scale: s, min: sMin, pos: [px, py] };
+    };
+
+    // ------------------------------------------------------------------ building
+    // New comp. o: {w, h, dur (frames), fps, like: comp to copy size/fps/duration/pixel aspect from, folder, bg: hex}.
+    A.addComp = function (name, o) {
+        o = o || {};
+        var like = o.like ? A.comp(o.like) : null;
+        var fps = o.fps || (like ? like.frameRate : 25);
+        var dur = o.dur !== undefined ? o.dur / fps : (like ? like.duration : 10);
+        var c = app.project.items.addComp(String(name), o.w || (like ? like.width : 1920), o.h || (like ? like.height : 1080),
+            like ? like.pixelAspect : 1, dur, fps);
+        if (o.folder) { c.parentFolder = A.folder(o.folder); } else if (like) { c.parentFolder = like.parentFolder; }
+        if (o.bg) { c.bgColor = A.hex(o.bg); }
+        return c;
+    };
+    // Remove comps (by name: every comp with that name), items, folders (with everything in them) or layers.
+    // Returns how many things were removed.
+    A.remove = function (x) {
+        var list = x instanceof Array ? x : [x], n = 0, i, j;
+        for (i = 0; i < list.length; i++) {
+            var v = list[i];
+            if (typeof v === "string") {
+                var cs = A.comps(v);
+                for (j = 0; j < cs.length; j++) { cs[j].remove(); n++; }
+                continue;
+            }
+            if (v instanceof FolderItem) { for (j = v.numItems; j >= 1; j--) { n += A.remove(v.item(j)); } }
+            v.remove(); n++;
+        }
+        return n;
+    };
+    // Build a comp again without ever leaving the project half-built. fn(comp) builds into a new comp; if it throws,
+    // the new comp is removed and everything stays as it was. If it succeeds, every layer that used the old comp
+    // (anywhere in the project) is switched to the new one, keeping its in/out/start (a layer that ran to the end of
+    // the old comp runs to the end of the new one), the old comp is removed, and the new one gets its name.
+    // o: AE.addComp options (default: like the old comp), replace: other items of the previous build to remove after
+    // a success (comp names, items, folders; resolved before fn runs, so fn's new comps of the same name stay).
+    A.rebuild = function (name, o, fn) {
+        if (typeof o === "function") { fn = o; o = {}; }
+        o = o || {};
+        var olds = A.comps(name);
+        if (olds.length > 1) { throw new Error("rebuild: comp name '" + name + "' is ambiguous (" + olds.length + " comps)"); }
+        var old = olds[0] || null, spec = {}, k, i, j;
+        for (k in o) { if (o.hasOwnProperty(k) && k !== "replace") { spec[k] = o[k]; } }
+        if (old && !spec.like) { spec.like = old; }
+        var extra = [], rep = o.replace ? (o.replace instanceof Array ? o.replace : [o.replace]) : [];
+        for (i = 0; i < rep.length; i++) {
+            if (typeof rep[i] === "string") { var cs = A.comps(rep[i]); for (j = 0; j < cs.length; j++) { extra.push(cs[j]); } }
+            else { extra.push(rep[i]); }
+        }
+        var c = A.addComp(name + " (building)", spec);
+        try {
+            fn(c);
+        } catch (e) {
+            try { c.remove(); } catch (e2) { }
+            throw e;
+        }
+        if (old) {
+            var users = old.usedIn;
+            for (i = 0; i < users.length; i++) {
+                for (j = 1; j <= users[i].numLayers; j++) {
+                    var L = users[i].layer(j);
+                    if (L.source === old) { swapSource(L, c); }
+                }
+            }
+            old.remove();
+        }
+        for (i = 0; i < extra.length; i++) { try { A.remove(extra[i]); } catch (e3) { } }
+        c.name = String(name);
+        return c;
+    };
+
+    // Text layer with a style (see AE.textStyle); o.box: [w, h] makes box (paragraph) text; o.pos, o.name.
+    A.addText = function (comp, text, o) {
+        comp = A.comp(comp);
+        o = o || {};
+        var L = o.box ? comp.layers.addBoxText(o.box, String(text)) : comp.layers.addText(String(text));
+        if (o.name) { L.name = o.name; }
+        A.textStyle(L, o);
+        if (o.pos) { A.set(A.tf(L, "pos"), o.pos); }
+        return L;
+    };
+    var JUSTIFY = { left: "LEFT_JUSTIFY", center: "CENTER_JUSTIFY", right: "RIGHT_JUSTIFY" };
+    // Style a text layer (every key if Source Text is keyed; expression-safe like setText).
+    // o: {font (PostScript name), size, fill: hex, stroke: hex, strokeWidth, tracking, leading (px; null = auto),
+    //     justify: "left"|"center"|"right", caps: true}
+    A.textStyle = function (L, o) {
+        var p = A.textProp(L), on = hasExpr(p);
+        function apply(td) {
+            if (o.font) { td.font = o.font; }
+            if (o.size) { td.fontSize = o.size; }
+            if (o.fill) { td.applyFill = true; td.fillColor = A.hex(o.fill); }
+            if (o.stroke) { td.applyStroke = true; td.strokeColor = A.hex(o.stroke); td.strokeWidth = o.strokeWidth || 1; }
+            if (o.tracking !== undefined) { td.tracking = o.tracking; }
+            if (o.leading === null) { td.autoLeading = true; } else if (o.leading !== undefined) { td.autoLeading = false; td.leading = o.leading; }
+            if (o.justify) {
+                if (!JUSTIFY[o.justify]) { throw new Error("textStyle: justify must be left|center|right"); }
+                td.justification = ParagraphJustification[JUSTIFY[o.justify]];
+            }
+            if (o.caps !== undefined) { td.allCaps = !!o.caps; }
+            return td;
+        }
+        if (on) { p.expressionEnabled = false; }
+        try {
+            if (p.numKeys > 0) {
+                for (var k = 1; k <= p.numKeys; k++) { p.setValueAtKey(k, apply(p.keyValue(k))); }
+            } else {
+                p.setValue(apply(p.value));
+            }
+        } finally {
+            if (on) { p.expressionEnabled = true; }
+        }
+        if (o.font && A.textDoc(L).font !== o.font) { A.warn("textStyle '" + L.name + "': font '" + o.font + "' is not installed, AE kept '" + A.textDoc(L).font + "'"); }
+        return L;
+    };
+
+    // Rectangle in a shape layer. target: a comp (a new shape layer, at position [0,0] so o.pos is in comp
+    // coordinates, pitfall 12) or an existing shape layer (o.pos in its own coordinates).
+    // o: {size: [w, h], pos: [x, y] centre, round, fill: hex (default white; null for none), stroke: hex, strokeWidth,
+    //     name: the group's name (default "Rect"), layer: the new layer's name}. Returns the shape layer; get the
+    //     group with AE.findProp(L, name). References to earlier groups die when a group is added (pitfall 14).
+    A.addRect = function (target, o) {
+        o = o || {};
+        var L;
+        if (target instanceof ShapeLayer) { L = target; } else {
+            L = A.comp(target).layers.addShape();
+            L.name = o.layer || o.name || "Rect";
+            A.set(A.tf(L, "pos"), [0, 0]);
+        }
+        var root = L.property("ADBE Root Vectors Group");
+        root.addProperty("ADBE Vector Group");
+        var gi = root.numProperties;
+        function contents() { return L.property("ADBE Root Vectors Group").property(gi).property("ADBE Vectors Group"); }
+        L.property("ADBE Root Vectors Group").property(gi).name = o.name || "Rect";
+        contents().addProperty("ADBE Vector Shape - Rect");
+        var r = contents().property(1);
+        r.property("ADBE Vector Rect Size").setValue(o.size || [100, 100]);
+        r.property("ADBE Vector Rect Position").setValue(o.pos || [0, 0]);
+        if (o.round) { r.property("ADBE Vector Rect Roundness").setValue(o.round); }
+        if (o.stroke) {
+            contents().addProperty("ADBE Vector Graphic - Stroke");
+            var st = contents().property(contents().numProperties);
+            st.property("ADBE Vector Stroke Color").setValue(A.hex(o.stroke, true));
+            st.property("ADBE Vector Stroke Width").setValue(o.strokeWidth || 1);
+        }
+        if (o.fill !== null) {
+            contents().addProperty("ADBE Vector Graphic - Fill");
+            contents().property(contents().numProperties).property("ADBE Vector Fill Color").setValue(A.hex(o.fill || "#FFFFFF", true));
+        }
+        return L;
+    };
+
+    // Effect by matchName, optionally renamed. Returns it, fetched fresh (adding an effect invalidates earlier
+    // references to the layer's effects: get those again with AE.fx).
+    A.addEffect = function (L, matchName, name) {
+        var fx = L.property("ADBE Effect Parade");
+        if (!fx.canAddProperty(matchName)) { throw new Error("addEffect: '" + matchName + "' cannot be added to '" + L.name + "'"); }
+        fx.addProperty(matchName);
+        var i = L.property("ADBE Effect Parade").numProperties;
+        if (name) { L.property("ADBE Effect Parade").property(i).name = name; }
+        return L.property("ADBE Effect Parade").property(i);
+    };
+    // An effect by name or index, or one of its parameters (index, name or matchName). Always a fresh reference.
+    A.fx = function (L, name, param) {
+        var e = L.property("ADBE Effect Parade").property(name);
+        if (!e) { throw new Error("fx: no effect '" + name + "' on '" + L.name + "'"); }
+        if (param === undefined) { return e; }
+        var p = e.property(param);
+        if (!p) { throw new Error("fx: effect '" + name + "' on '" + L.name + "' has no parameter '" + param + "'"); }
+        return p;
+    };
+    var CONTROLS = { slider: "ADBE Slider Control", checkbox: "ADBE Checkbox Control", color: "ADBE Color Control",
+        point: "ADBE Point Control", angle: "ADBE Angle Control", layer: "ADBE Layer Control" };
+    // Expression control: kind slider|checkbox|color|point|angle|layer, named `name`, set to v (hex for color,
+    // true/false for checkbox, a layer for layer). Returns its value property: in expressions, effect("name")(1).
+    A.control = function (L, kind, name, v) {
+        if (!CONTROLS[kind]) { throw new Error("control: kind must be slider|checkbox|color|point|angle|layer"); }
+        A.addEffect(L, CONTROLS[kind], name);
+        var p = A.fx(L, name, 1);
+        if (v !== undefined && v !== null) {
+            if (kind === "color") { v = A.hex(v, true); } else if (kind === "checkbox") { v = v ? 1 : 0; } else if (kind === "layer") { v = v.index; }
+            p.setValue(v);
+        }
+        return p;
+    };
+
+    // Opacity keys from `a` at frame fromF to `b` at toF (default 0 -> 100). opts as in AE.key (default ease 33/33).
+    A.fade = function (L, fromF, toF, a, b, opts) {
+        var op = A.tf(L, "opacity");
+        opts = opts || { ease: 33 };
+        return [A.key(op, fromF, a === undefined ? 0 : a, opts), A.key(op, toF, b === undefined ? 100 : b, opts)];
+    };
+    // Remove every key of a property. Time Remap is reset to AE's default two keys instead (removing its last key
+    // hides it, and later setValue calls fail, pitfall 13). Returns the property, fetched fresh.
+    A.clearKeys = function (prop) {
+        if (prop.matchName === "ADBE Time Remapping") {
+            var L = prop.propertyGroup(prop.propertyDepth);
+            L.timeRemapEnabled = false;
+            L.timeRemapEnabled = true;
+            return L.property("ADBE Time Remapping");
+        }
+        while (prop.numKeys > 0) { prop.removeKey(prop.numKeys); }
+        return prop;
     };
 
     // ------------------------------------------------------------------ dump

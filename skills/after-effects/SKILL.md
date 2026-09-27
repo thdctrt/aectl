@@ -70,7 +70,7 @@ ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 44 checks in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 53 checks in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -119,7 +119,8 @@ name or numeric id.
   In place it lands right above the source, in another comp at the top, or above `above` (layer or index).
 - `AE.findProp(group, matchNameOrName)` searches recursively. `AE.findProps(...)` returns all matches.
 - `AE.tf(layer, "pos"|"anchor"|"scale"|"rot"|"opacity"|"x"|"y"|matchName)` returns a transform property.
-- `AE.footage(path, folder?)` finds a FootageItem by `file.fsName`, or imports it (into `AE.folder(folder)`).
+- `AE.footage(path, folder?, {reload})` finds a FootageItem by `file.fsName`, or imports it (into `AE.folder(folder)`).
+  `reload: true` re-reads a file that changed on disk.
   Afterwards `AE.lastImported` is true/false and `AE.imported` holds the items imported during this script.
 - `AE.folder(name, parent?)` finds or creates a folder. `AE.items(Type?)`, `AE.itemPath(item)` returns `"a/b"`.
 
@@ -146,16 +147,32 @@ name or numeric id.
   - `like: [srcProp, srcKey]` copies interpolation and ease from a reference key;
   - hex strings work for colour properties.
 
-  Returns the key index.
+  Returns the key index. List form: `AE.key(prop, [[frame, value, opts|ease], ...], opts)` sets several keys.
 - `AE.copyEase(prop, k|"all", srcProp, srcK)` copies in/out interpolation, temporal ease, and continuous/auto-bezier.
   The ease-array length adapts to the target dimension (e.g. a spatial Position with 1 entry from a Scale with 3).
 - `AE.keys(prop)` returns `[{frame, time, index, value, "in", "out", inEase, outEase}]`. Read the interpolation types as
   **`k["in"]` / `k["out"]`**: `k.in` works in AE 2026 but is a syntax error in older versions.
 - `AE.set(prop, value)` is a `setValue` that pads missing dimensions (z) and throws clearly if the property is keyed.
 
+**Building** (the usual script: resolve every input first, then build; a rebuild never leaves a half-built project)
+- `AE.rebuild(name, [o], fn(comp))` builds `name` again: `fn` fills a new comp; if it throws, the new comp is removed
+  and nothing changed. On success every layer using the old comp is switched to the new one (in/out/start kept), the
+  old comp is removed, and the new one takes its name. `o`: `AE.addComp` options (default: like the old comp) and
+  `replace` (comp names/items/folders of the previous build to remove after a success).
+- `AE.addComp(name, {w, h, dur (frames), fps, like, folder, bg})`, `AE.remove(compName|item|folder|layer|[...])`.
+- `AE.addText(comp, text, {font, size, fill, stroke, strokeWidth, tracking, leading, justify, caps, box:[w,h], pos, name})`;
+  `AE.textStyle(layer, {...same})` restyles (every key, expression-safe). Warns when the font is not installed.
+- `AE.addRect(compOrShapeLayer, {size, pos, round, fill, stroke, strokeWidth, name, layer})` returns the shape layer.
+  A new layer sits at [0,0], so `pos` is in comp coordinates (pitfall 12). Find the group with `AE.findProp(L, name)`.
+- `AE.addEffect(layer, matchName, name?)`, `AE.fx(layer, name, param?)` (fresh references, pitfall 14),
+  `AE.control(layer, "slider"|"checkbox"|"color"|"point"|"angle"|"layer", name, value)` returns the value property.
+- `AE.fade(layer, fromF, toF, a=0, b=100, opts)`; `AE.clearKeys(prop)` (Time Remap is reset to its two default
+  keys instead of being hidden, pitfall 13).
+
 **Footage placement**
-- `AE.replaceFootage(layer, pathOrItem, {folder, anchor, scale, pos, start, inF, outF, mute, name, cover})`:
-  - `replaceSource(item, false)` keeps the transforms;
+- `AE.replaceFootage(layer, pathOrItem, {folder, anchor, scale, pos, start, inF, outF, mute, name, cover, reload})`:
+  - `replaceSource(item, false)` keeps the transforms and in/out; a layer that ran to the end of its old source runs
+    to the end of the new one;
   - `start` is the startTime in frames;
   - `name: true` means use the item's name;
   - `cover: true` or `{...}` runs `AE.cover` after the swap.

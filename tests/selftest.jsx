@@ -116,6 +116,49 @@ AE.run("aetools test", function (log) {
     var pngs = AE.snap(c, [0, 30, 60], AE.tmp + "/selftest", "selftest", "half");
     check("snap queued (ae run waits for the files)", pngs.length === 3, pngs[0]);
 
+    // ---- building helpers: addComp/addText/addRect/control/addEffect/fx/key list/fade/clearKeys/rebuild
+    var B = AE.addComp("__aetools_test_build", { like: c, dur: 50, folder: TF });
+    check("addComp", B.width === 1920 && near(B.frameRate, 25) && Math.round(B.duration / B.frameDuration) === 50 && B.parentFolder === TF);
+    var BL = c.layers.add(B); BL.name = "__build"; AE.trim(BL, 10, 40);
+    var tx = AE.addText(B, "Hello", { size: 72, fill: "#FF0000", justify: "center", tracking: 20, leading: 90, pos: [960, 540], name: "__t" });
+    var txd = AE.textDoc(tx);
+    check("addText style", near(txd.fontSize, 72) && AE.toHex(txd.fillColor) === "#FF0000" && txd.justification === ParagraphJustification.CENTER_JUSTIFY &&
+        near(txd.tracking, 20) && near(txd.leading, 90) && near(AE.tf(tx, "pos").value[0], 960), [txd.fontSize, AE.toHex(txd.fillColor), txd.tracking, txd.leading]);
+    var R = AE.addRect(B, { size: [200, 100], pos: [960, 540], round: 10, fill: "#00FF00", stroke: "#0000FF", strokeWidth: 4, name: "Box" });
+    AE.addRect(R, { size: [50, 50], name: "Box2", fill: "#000000" });
+    var box = AE.findProp(R, "Box");
+    check("addRect: layer at [0,0], two groups, sizes/colours", near(AE.tf(R, "pos").value[0], 0) && box !== null && AE.findProp(R, "Box2") !== null &&
+        AE.str(AE.findProp(box, "ADBE Vector Rect Size").value) === "[200,100]" && AE.toHex(AE.findProp(box, "ADBE Vector Fill Color").value) === "#00FF00" &&
+        near(AE.findProp(box, "ADBE Vector Stroke Width").value, 4), AE.findProp(box, "ADBE Vector Rect Size").value);
+    AE.control(R, "slider", "Amount", 5);
+    AE.addEffect(R, "ADBE Gaussian Blur 2", "Blur");
+    AE.control(R, "color", "Tint", "#0088FF");
+    check("control/addEffect/fx stay valid after more effects", near(AE.fx(R, "Amount", 1).value, 5) && AE.fx(R, "Blur").matchName === "ADBE Gaussian Blur 2" &&
+        AE.toHex(AE.fx(R, "Tint", 1).value) === "#0088FF");
+    var rop = AE.tf(R, "opacity");
+    AE.key(rop, [[0, 0], [10, 100, { interp: "linear" }], [20, 50, [10, 90]]], { ease: 50 });
+    var rk = AE.keys(rop);
+    check("key list form", rk.length === 3 && rk[1]["in"] === "linear" && near(rk[2].inEase[0].influence, 10) && near(rk[2].outEase[0].influence, 90) &&
+        near(rk[0].outEase[0].influence, 50), [rk.length, rk[1]["in"]]);
+    AE.clearKeys(rop);
+    AE.fade(R, 0, 5);
+    rk = AE.keys(AE.tf(R, "opacity"));
+    check("clearKeys + fade", rk.length === 2 && near(rk[0].value, 0) && near(rk[1].value, 100) && rk[1].frame === 5, rk.length);
+    var TR = B.layers.add(AE.footage(CLIP)); TR.name = "__remap";
+    TR.timeRemapEnabled = true;
+    AE.key(TR.property("ADBE Time Remapping"), 10, 1);
+    var trp = AE.clearKeys(TR.property("ADBE Time Remapping"));
+    var trOk = true; try { AE.key(trp, 5, 2); } catch (eTR) { trOk = false; log("  ", eTR.message); }
+    check("clearKeys on Time Remap leaves it usable", trOk && TR.timeRemapEnabled && trp.numKeys >= 2, trp.numKeys);
+    var threwB = false;
+    try { AE.rebuild("__aetools_test_build", function () { throw new Error("boom"); }); } catch (eB) { threwB = eB.message === "boom"; }
+    check("failed rebuild leaves the old comp in place", threwB && AE.comps("__aetools_test_build").length === 1 && AE.comps("__aetools_test_build (building)").length === 0 &&
+        AE.layer(c, "__build").source === B);
+    var B2 = AE.rebuild("__aetools_test_build", { dur: 60 }, function (nc) { AE.addText(nc, "New", { name: "__t2" }); });
+    var BL2 = AE.layer(c, "__build");
+    check("rebuild swaps every use and keeps the placement", BL2.source === B2 && B2.name === "__aetools_test_build" && AE.comps("__aetools_test_build").length === 1 &&
+        B2.parentFolder === TF && Math.round(B2.duration / B2.frameDuration) === 60 && AE.span(BL2) === "in=10 out=40 st=0" && B2.layer("__t2") !== null, AE.span(BL2));
+
     // ---- copyLayer returns the copy (copyToComp's own index/reference behaviour, pitfall 11); undo checks the name
     var nL = c.numLayers, src = AE.layer(c, "__txt"), cp = AE.copyLayer(src, null, { name: "__txt copy" });
     src = AE.layer(c, "__txt");
