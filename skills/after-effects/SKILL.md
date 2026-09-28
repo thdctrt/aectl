@@ -41,20 +41,18 @@ AE.run("Retime intro", function (log) {          // one Cmd+Z step, dialogs supp
   or to `--log file`. It is printed, and the exit code is 1 if any line starts with `ERR`.
 - Errors come out as `ERR <message> @ my_edit.jsx:12` (line in YOUR file) or `@ lib.jsx:N` when a helper threw.
 - Log line prefixes: `ERR` (failure, exit 1), `WARN` (e.g. a trim that would not stick), `PNG <path>` (the runner waits
-  for that file), `DONE/FAILED <name> (ms)` (end of each `AE.run`), `UNDO <step>` (the Cmd+Z step it made, with a run
-  id: `Retime intro #1a2b`), `ROLLED BACK <step>`.
-- **Taking a run back**: `ae undo` undoes the steps of the last run, newest first; `ae undo "Retime intro #1a2b"` one
-  named step. Each is undone only while it is AE's last step (the Edit menu reads "Undo <step>"); otherwise it stops
-  and says so, and never touches anything the user did. `ae run --rollback` undoes a failed run's step right away, so a
-  script that throws halfway leaves nothing behind.
+  for that file), `DONE/FAILED <name> (ms)` (end of each `AE.run`), `UNDO <step>` (the Cmd+Z step it made), `ROLLED BACK <step>`.
+- **A run that throws is undone** (`ROLLED BACK`), so a script that fails halfway leaves nothing behind; fix it and run
+  it again. `--no-rollback` keeps the partial result. Only a throw rolls back, not `ERR`/`WARN` lines you log yourself.
+  A run that succeeded cannot be undone from a script (AE does not say what its last step is): ask the user to press
+  Cmd+Z, naming the `UNDO` step they should see in the Edit menu.
 - Standalone, without the CLI: `#include` the lib and call `AE.run(name, "/abs/log.txt", fn)`. Without a logPath
   it writes to `AE.tmp/ae_run.log`.
 
 ## CLI
 
 ```
-ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
-ae undo ["step" ...]                                         # take back the last run (or named steps), only while they are AE's last
+ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
 ae check script.jsx [more.jsx ...]                           # syntax + ExtendScript lint only (no AE needed)
 ae eval 'AE.comp("Logo").numLayers' [--ro]                   # the value of the last expression is logged
 ae eval 'var c=AE.comp("Logo"); c.duration' --ro             # (or of a top-level `return x`); no IIFE needed
@@ -73,7 +71,7 @@ ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 57 checks in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 53 checks + a rollback round trip in a throwaway comp, then cleanup (dirties the project)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
@@ -168,8 +166,8 @@ name or numeric id.
 
 **Building** (the usual script: resolve every input first, then build; a rebuild never leaves a half-built project)
 - `AE.rebuild(name, [o], fn(comp))` builds `name` again: `fn` fills a new comp; if it throws, everything the build
-  added (comps, footage, folders) is removed and the old comp is untouched (changes `fn` made to existing items stay:
-  use `ae run --rollback` for those). On success every layer using the old comp is switched to the new one (in/out/start kept), the
+  added (comps, footage, folders) is removed and the old comp is untouched (and under `ae run` the rollback also
+  undoes whatever `fn` changed in existing items). On success every layer using the old comp is switched to the new one (in/out/start kept), the
   old comp is removed, and the new one takes its name. `o`: `AE.addComp` options (default: like the old comp) and
   `replace` (comp names/items/folders of the previous build to remove after a success).
 - `AE.addComp(name, {w, h, dur (frames), fps, like, folder, bg})`, `AE.remove(compName|item|folder|layer|[...])`.
@@ -198,10 +196,9 @@ name or numeric id.
   Assumes rotation 0. Returns `{scale, min, pos}`.
 
 **Run / log / inspect**
-- `AE.run(name, [logPath], fn(log), [{undo:false, rollback:true}])` and `AE.peek(name, fn)` (no undo group). A nested
-  `AE.run` gets its own try/catch but joins the outer undo group. `rollback` undoes the step when `fn` throws.
-- `AE.undo(step)` undoes that step only if it is AE's last one; returns false (and does nothing) otherwise. Throws
-  inside an undo group (in `AE.run`): use `ae undo` or `rollback` there.
+- `AE.run(name, [logPath], fn(log), [{undo:false, rollback:false}])` and `AE.peek(name, fn)` (no undo group). A nested
+  `AE.run` gets its own try/catch but joins the outer undo group. `rollback` (default under `ae run`/`ae eval`)
+  undoes the step when `fn` throws.
 - `AE.log(...)`, `AE.warn(...)`, `AE.str(anything)`: `str` is a safe stringify for arrays, TextDocument, KeyframeEase,
   Shape, layers and items.
 - `AE.dump(comp, {depth, keys, maxKeys, filter, rawText, at, props})` returns the text tree:
@@ -226,7 +223,7 @@ name or numeric id.
 
 1. **`"x" + array` throws** ("invalid numeric result") because this engine overloads `+` for arrays. Use `AE.str(v)`,
    `String(arr)` or `arr.join(",")`. `log()` already does this, and the lint warns about `"x" + L.transform.position.value`.
-2. **Never call `app.executeCommand`**. The lint refuses it. To take a step back use `ae undo` / `AE.undo`.
+2. **Never call `app.executeCommand`**. The lint refuses it. A failed run is rolled back for you (above).
 3. **Wrap mutations**: suppress dialogs, one undo group, try/catch logging `message` + line. This is `AE.run`, and
    `ae run` adds it automatically.
 4. **Logs**: `f.encoding="UTF-8"` **and `f.lineFeed="Unix"`**. The macOS default writes CR, which is why old logs looked

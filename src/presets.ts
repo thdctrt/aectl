@@ -58,7 +58,7 @@ export const PRESETS: Preset[] = [
     video: ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30", "-b:v", "0", "-row-mt", "1"],
     audio: ["-c:a", "libopus", "-b:a", "128k"],
   },
-  { name: "gif", use: "animated GIF, 15 fps, at most 640 wide", ext: "gif", maxWidth: 640, fps: 15, gif: true, video: [], audio: null },
+  { name: "gif", use: "animated GIF, 20 fps (GIF frame times are in 1/100 s), at most 640 wide", ext: "gif", maxWidth: 640, fps: 20, gif: true, video: [], audio: null },
 ];
 
 export function findPreset(name: string): Preset | undefined {

@@ -6696,7 +6696,6 @@ async function waitPngs(timeoutSec, paths) {
     await sleep(300);
   }
 }
-var UNDO_FILE = path4.join(WORK, "undo.json");
 async function runJsx(user, log, o) {
   need("osascript");
   if (!exists(LIB)) {
@@ -6752,8 +6751,6 @@ AE._end();
   const text = readFileSync2(log, "utf8");
   const lines = text.split("\n");
   const failed = lines.some((l) => l.startsWith("ERR"));
-  const steps = lines.filter((l) => l.startsWith("UNDO ")).map((l) => l.slice(5));
-  if (steps.length) writeFileSync2(UNDO_FILE, JSON.stringify({ steps }) + "\n");
   if (o.quiet) {
     if (failed) process.stderr.write(text);
   } else {
@@ -7022,7 +7019,7 @@ var PRESETS = [
     video: ["-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-crf", "30", "-b:v", "0", "-row-mt", "1"],
     audio: ["-c:a", "libopus", "-b:a", "128k"]
   },
-  { name: "gif", use: "animated GIF, 15 fps, at most 640 wide", ext: "gif", maxWidth: 640, fps: 15, gif: true, video: [], audio: null }
+  { name: "gif", use: "animated GIF, 20 fps (GIF frame times are in 1/100 s), at most 640 wide", ext: "gif", maxWidth: 640, fps: 20, gif: true, video: [], audio: null }
 ];
 function findPreset(name) {
   const n = name.toLowerCase();
@@ -7171,7 +7168,8 @@ function encode(preset, input, output, fit, stats = false) {
 function describe(file) {
   const v = probeVideo(file);
   const fps = rate(v.avgFrameRate);
-  const alpha = /^(yuva|rgba|argb|bgra|abgr|gbrap|ya)/.test(v.pixFmt) || v.pixFmt === "pal8";
+  const vp9Alpha = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream_tags=alpha_mode", "-of", "csv=p=0", file]).stdout.trim() === "1";
+  const alpha = /^(yuva|rgba|argb|bgra|abgr|gbrap|ya)/.test(v.pixFmt) || v.pixFmt === "pal8" || vp9Alpha;
   const dur = Number(v.duration);
   return `${v.width}x${v.height} ${isNaN(fps) ? "?" : +fps.toFixed(3)}fps ${isNaN(dur) ? "?" : dur.toFixed(2)}s ${v.codec} ${v.pixFmt}${alpha ? " (alpha)" : ""} audio=${hasAudio(file) ? "yes" : "no"} size=${(statSync3(file).size / 1048576).toFixed(1)}MB`;
 }
@@ -7472,12 +7470,12 @@ function humanSize(n) {
 }
 
 // src/commands/script.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync4, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import path10 from "node:path";
 async function cmdRun(argv) {
-  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo", "--rollback"]);
+  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo", "--no-rollback"]);
   let script = p.pos[p.pos.length - 1] ?? "";
-  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]");
+  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]");
   if (!isFile(script)) die("no such file: " + script);
   script = abspath(script);
   let log = str(p, "--log");
@@ -7490,17 +7488,18 @@ async function cmdRun(argv) {
   else if (p.opts["--undo"]) undo = true;
   else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync4(script, "utf8"));
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0;
-  return runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: p.opts["--rollback"] === true });
+  return runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: !p.opts["--no-rollback"] });
 }
 async function cmdEval(argv) {
   const undo = !argv.includes("--ro");
-  const code = argv.filter((a) => a !== "--ro").join("\n");
-  if (!code) die("usage: ae eval 'js code' [--ro]   (the value of the last expression is logged)");
+  const rollback = !argv.includes("--no-rollback");
+  const code = argv.filter((a) => a !== "--ro" && a !== "--no-rollback").join("\n");
+  if (!code) die("usage: ae eval 'js code' [--ro] [--no-rollback]   (the value of the last expression is logged)");
   const dir = path10.join(WORK, "eval");
   mkdirSync6(dir, { recursive: true });
   const f = path10.join(dir, "eval.jsx");
   writeFileSync3(f, evalScript(code));
-  return runJsx(f, path10.join(dir, "eval.log"), { undo, label: "ae eval" });
+  return runJsx(f, path10.join(dir, "eval.log"), { undo, label: "ae eval", rollback });
 }
 async function cmdCheck(argv) {
   if (!argv.length) die("usage: ae check script.jsx [more.jsx ...]");
@@ -7517,31 +7516,6 @@ async function cmdCheck(argv) {
     else code = 2;
   }
   return code;
-}
-async function cmdUndo(argv) {
-  const p = parseArgs(argv, "undo");
-  let steps = p.pos;
-  if (!steps.length) {
-    try {
-      steps = JSON.parse(readFileSync4(UNDO_FILE, "utf8")).steps;
-    } catch {
-      die('undo: no undo step recorded; name one: ae undo "<step>" (the UNDO line of a run)');
-    }
-  }
-  const code = `var S = [${steps.map(jsstr).join(", ")}];
-for (var i = S.length - 1; i >= 0; i--) {
-    if (!AE.undo(S[i])) { throw new Error("the last step in AE is not '" + S[i] + "' (Edit menu), so nothing more was undone"); }
-    log("UNDONE " + S[i]);
-}
-`;
-  const r = await runSnippet("undo", "undo", code, { undo: false, label: "ae undo", internal: true });
-  if (!p.pos.length && r.code !== 3) {
-    const done = new Set(readLog(r.log).split("\n").filter((l) => l.startsWith("UNDONE ")).map((l) => l.slice(7)));
-    const left = steps.filter((s) => !done.has(s));
-    if (left.length) writeFileSync3(UNDO_FILE, JSON.stringify({ steps: left }) + "\n");
-    else rmSync4(UNDO_FILE, { force: true });
-  }
-  return r.code;
 }
 
 // src/commands/setup.ts
@@ -7656,50 +7630,35 @@ async function cmdSelftest(argv) {
     }
   }
   let code = await runJsx(path11.join(TOOLS, "tests", "selftest.jsx"), path11.join(WORK, "logs", "selftest.log"), { undo: false, label: "selftest.jsx" });
-  if (code === 0) code = await undoRoundTrip();
+  if (code === 0) code = await rollbackRoundTrip();
   if (!keep) {
     const c = await runJsx(path11.join(TOOLS, "tests", "cleanup.jsx"), path11.join(WORK, "logs", "cleanup.log"), { undo: false, label: "cleanup.jsx", quiet: true });
     if (c === 0) err("ae: cleanup done");
   }
   return code;
 }
-async function undoRoundTrip() {
+async function rollbackRoundTrip() {
   const T = 'AE.comp("__aetools_test")';
   const CHECK = `function check(name, ok, info) { log((ok ? "PASS " : "ERR FAIL ") + name + (info === undefined ? "" : "  " + AE.str(info))); }
 `;
-  const change = await runSnippet("selftest", "undo_change", `AE.run("aetools undo probe", function () { ${T}.comment = "undo probe"; });
-`, { undo: false, label: "undo probe", quiet: true });
-  const step = readLog(change.log).split("\n").find((l) => l.startsWith("UNDO "))?.slice(5) ?? "";
-  if (change.code || !step) {
-    err("ae: undo round trip: the probe run failed or logged no UNDO line");
-    return 1;
-  }
-  const undo = await runSnippet(
-    "selftest",
-    "undo_check",
-    CHECK + `check("undo refuses a step that is not the last one", AE.undo("aetools no such step") === false);
-var undone = AE.undo(${jsstr(step)});
-check("undo takes back the last run (Edit menu: Undo " + ${jsstr(step)} + ")", undone && ${T}.comment === "", [undone, ${T}.comment]);
-`,
-    { undo: false, label: "undo check" }
-  );
-  const fail = await runSnippet(
-    "selftest",
-    "rollback_probe",
-    `AE.run("aetools rollback probe", function () { ${T}.comment = "rollback probe"; throw new Error("expected by the self-test"); }, { rollback: true });
-`,
-    { undo: false, label: "rollback probe", quiet: true, rollback: false }
-  );
-  const rolled = readLog(fail.log).includes("ROLLED BACK aetools rollback probe");
-  const rb = await runSnippet(
+  const probe = (name, body) => runSnippet("selftest", name, `AE.run(${jsstr(name)}, function () { ${body} throw new Error("expected by the self-test"); });
+`, { undo: false, label: name, quiet: true, rollback: true });
+  const keep = await runSnippet("selftest", "rollback_keep", `AE.run("rollback keep", function () { ${T}.comment = "keep"; });
+`, { undo: false, label: "rollback keep", quiet: true, rollback: true });
+  if (keep.code) return keep.code;
+  err("ae: two runs that fail on purpose follow (their ERR lines are expected)");
+  const changed = await probe("rollback probe", `${T}.comment = "changed";`);
+  const empty2 = await probe("rollback empty", "");
+  const rolled = [changed, empty2].every((r2) => r2.code === 1 && readLog(r2.log).includes("ROLLED BACK"));
+  const r = await runSnippet(
     "selftest",
     "rollback_check",
-    CHECK + `check("rollback takes back a failed run", ${rolled} && ${T}.comment === "", [${rolled}, ${T}.comment]);
+    CHECK + `check("rollback undoes a failed run, and nothing before it", ${rolled} && ${T}.comment === "keep", [${rolled}, ${T}.comment]);
 ${T}.comment = "";
 `,
     { undo: false, label: "rollback check" }
   );
-  return undo.code || rb.code;
+  return r.code;
 }
 async function cmdCompletion(argv) {
   if (argv[0] !== "zsh") die('usage: ae completion zsh   (then add  eval "$(ae completion zsh)"  to ~/.zshrc)');
@@ -7749,9 +7708,8 @@ async function cmdHook() {
 
 // src/cli.ts
 var USAGE3 = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
-  ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]
-  ae undo ["step" ...]            take back the last run's undo steps (or the named ones), only while they are AE's last
-  ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
+  ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]   (a failed run is undone unless --no-rollback)
+  ae eval 'js' [--ro] [--no-rollback]    ae check script.jsx [more.jsx ...]
   ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
   ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]
@@ -7772,7 +7730,6 @@ Exit codes: 0 ok, 1 script logged ERR, 2 usage/syntax/lint error, 3 AE not runni
 var COMMANDS = {
   run: cmdRun,
   eval: cmdEval,
-  undo: cmdUndo,
   check: cmdCheck,
   dump: cmdDump,
   tree: cmdTree,

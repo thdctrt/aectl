@@ -23,7 +23,6 @@ _ae() {
   cmds=(
     'run:lint and run a .jsx as one undo step'
     'eval:run JS (the last expression is printed)'
-    'undo:take back the last run (only while it is the last step in AE)'
     'check:syntax + ES3 lint only'
     'dump:print one comp in detail'
     'tree:project overview + layers of the active comp'
@@ -57,14 +56,12 @@ _ae() {
         '--log[log file]:log file:_files' \
         '(--undo)--ro[no undo group]' \
         '(--ro)--undo[force one undo group]' \
-        '--rollback[undo the step right away when the script fails]' \
+        '--no-rollback[keep what a failed run changed]' \
         '--timeout[seconds to wait for the log]:seconds:' ;;
     check)
       _arguments '1:script:_files -g "*.jsx(-.)"' ;;
     eval)
-      _arguments '1:js code:' '--ro[no undo group]' ;;
-    undo)
-      _arguments '*:undo step (an UNDO line of a run):' ;;
+      _arguments '1:js code:' '--ro[no undo group]' '--no-rollback[keep what a failed run changed]' ;;
     dump)
       _arguments \
         '1:comp:_ae_comps' \

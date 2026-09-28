@@ -130,7 +130,7 @@ export async function cmdSelftest(argv: string[]): Promise<number> {
     }
   }
   let code = await runJsx(path.join(TOOLS, "tests", "selftest.jsx"), path.join(WORK, "logs", "selftest.log"), { undo: false, label: "selftest.jsx" });
-  if (code === 0) code = await undoRoundTrip();
+  if (code === 0) code = await rollbackRoundTrip();
   if (!keep) {
     const c = await runJsx(path.join(TOOLS, "tests", "cleanup.jsx"), path.join(WORK, "logs", "cleanup.log"), { undo: false, label: "cleanup.jsx", quiet: true });
     if (c === 0) err("ae: cleanup done");
@@ -139,43 +139,29 @@ export async function cmdSelftest(argv: string[]): Promise<number> {
 }
 
 /**
- * What the in-AE self-test cannot check from inside its own undo group: a change made by one run is taken back by
- * `AE.undo` (what `ae undo` does), a step that is not the last is refused, and a failing run with rollback leaves
- * nothing behind. Uses the comment of the test comp.
+ * Rollback, which the in-AE self-test cannot check from inside its own undo group: a failed run is undone, and one
+ * that fails before changing anything leaves the step before it alone. Uses the comment of the test comp.
  */
-async function undoRoundTrip(): Promise<number> {
+async function rollbackRoundTrip(): Promise<number> {
   const T = 'AE.comp("__aetools_test")';
   const CHECK = `function check(name, ok, info) { log((ok ? "PASS " : "ERR FAIL ") + name + (info === undefined ? "" : "  " + AE.str(info))); }\n`;
-  const change = await runSnippet("selftest", "undo_change", `AE.run("aetools undo probe", function () { ${T}.comment = "undo probe"; });\n`, { undo: false, label: "undo probe", quiet: true });
-  const step = readLog(change.log).split("\n").find((l) => l.startsWith("UNDO "))?.slice(5) ?? "";
-  if (change.code || !step) {
-    err("ae: undo round trip: the probe run failed or logged no UNDO line");
-    return 1;
-  }
-  const undo = await runSnippet(
-    "selftest",
-    "undo_check",
-    CHECK +
-      `check("undo refuses a step that is not the last one", AE.undo("aetools no such step") === false);\n` +
-      `var undone = AE.undo(${jsstr(step)});\n` +
-      `check("undo takes back the last run (Edit menu: Undo " + ${jsstr(step)} + ")", undone && ${T}.comment === "", [undone, ${T}.comment]);\n`,
-    { undo: false, label: "undo check" },
-  );
-  // a run that changes something and then throws: exit 1 expected, with ROLLED BACK in its log
-  const fail = await runSnippet(
-    "selftest",
-    "rollback_probe",
-    `AE.run("aetools rollback probe", function () { ${T}.comment = "rollback probe"; throw new Error("expected by the self-test"); }, { rollback: true });\n`,
-    { undo: false, label: "rollback probe", quiet: true, rollback: false },
-  );
-  const rolled = readLog(fail.log).includes("ROLLED BACK aetools rollback probe");
-  const rb = await runSnippet(
+  const probe = (name: string, body: string) =>
+    runSnippet("selftest", name, `AE.run(${jsstr(name)}, function () { ${body} throw new Error("expected by the self-test"); });\n`, { undo: false, label: name, quiet: true, rollback: true });
+  const keep = await runSnippet("selftest", "rollback_keep", `AE.run("rollback keep", function () { ${T}.comment = "keep"; });\n`, { undo: false, label: "rollback keep", quiet: true, rollback: true });
+  if (keep.code) return keep.code;
+  err("ae: two runs that fail on purpose follow (their ERR lines are expected)");
+  const changed = await probe("rollback probe", `${T}.comment = "changed";`);
+  const empty = await probe("rollback empty", "");
+  const rolled = [changed, empty].every((r) => r.code === 1 && readLog(r.log).includes("ROLLED BACK"));
+  const r = await runSnippet(
     "selftest",
     "rollback_check",
-    CHECK + `check("rollback takes back a failed run", ${rolled} && ${T}.comment === "", [${rolled}, ${T}.comment]);\n${T}.comment = "";\n`,
+    CHECK +
+      `check("rollback undoes a failed run, and nothing before it", ${rolled} && ${T}.comment === "keep", [${rolled}, ${T}.comment]);\n` +
+      `${T}.comment = "";\n`,
     { undo: false, label: "rollback check" },
   );
-  return undo.code || rb.code;
+  return r.code;
 }
 
 // ------------------------------------------------------------------------------------------ completion

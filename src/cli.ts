@@ -4,14 +4,13 @@ import { cmdExport } from "./commands/export.ts";
 import { cmdDump, cmdSnap, cmdTree } from "./commands/inspect.ts";
 import { cmdFrames, cmdMeasure, cmdProbe, cmdSheet } from "./commands/media.ts";
 import { cmdSave } from "./commands/save.ts";
-import { cmdCheck, cmdEval, cmdRun, cmdUndo } from "./commands/script.ts";
+import { cmdCheck, cmdEval, cmdRun } from "./commands/script.ts";
 import { cmdCompletion, cmdDoctor, cmdHook, cmdNames, cmdSelftest } from "./commands/setup.ts";
 import { err, Exit } from "./util.ts";
 
 export const USAGE = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
-  ae run script.jsx [--log file] [--ro|--undo] [--rollback] [--timeout s]
-  ae undo ["step" ...]            take back the last run's undo steps (or the named ones), only while they are AE's last
-  ae eval 'js' [--ro]            ae check script.jsx [more.jsx ...]
+  ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]   (a failed run is undone unless --no-rollback)
+  ae eval 'js' [--ro] [--no-rollback]    ae check script.jsx [more.jsx ...]
   ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
   ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]
@@ -33,7 +32,6 @@ Exit codes: 0 ok, 1 script logged ERR, 2 usage/syntax/lint error, 3 AE not runni
 const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   run: cmdRun,
   eval: cmdEval,
-  undo: cmdUndo,
   check: cmdCheck,
   dump: cmdDump,
   tree: cmdTree,

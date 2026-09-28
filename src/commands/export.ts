@@ -125,7 +125,9 @@ export function encode(preset: Preset, input: string, output: string, fit: Fit, 
 export function describe(file: string): string {
   const v = probeVideo(file);
   const fps = rate(v.avgFrameRate);
-  const alpha = /^(yuva|rgba|argb|bgra|abgr|gbrap|ya)/.test(v.pixFmt) || v.pixFmt === "pal8";
+  // VP9 keeps alpha in a side stream: the pixel format says yuv420p, the alpha_mode tag says alpha
+  const vp9Alpha = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream_tags=alpha_mode", "-of", "csv=p=0", file]).stdout.trim() === "1";
+  const alpha = /^(yuva|rgba|argb|bgra|abgr|gbrap|ya)/.test(v.pixFmt) || v.pixFmt === "pal8" || vp9Alpha;
   const dur = Number(v.duration);
   return (
     `${v.width}x${v.height} ${isNaN(fps) ? "?" : +fps.toFixed(3)}fps ${isNaN(dur) ? "?" : dur.toFixed(2)}s ${v.codec} ${v.pixFmt}` +

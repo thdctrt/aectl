@@ -142,18 +142,21 @@ var AE = (function () {
     //   opts.undo=false -> no undo group. Nested calls: own try/catch, but no second undo group
     //   (the outer one covers it) and no log write. Under `ae run` the runner writes the log;
     //   standalone without logPath -> AE.tmp/ae_run.log.
-    //   Under the CLI the undo step gets a run id ("Name #1a2b") and is logged as "UNDO <step>", so `ae undo`
-    //   can take back exactly that step. opts.rollback (or `ae run --rollback`): on an error, undo the step at once.
+    //   The undo step is logged as "UNDO <name>". opts.rollback (default under `ae run`/`ae eval`): when fn throws,
+    //   the step is undone at once, so a failed run leaves nothing behind. That is safe only right here: while the
+    //   script runs, nobody else can add an undo step, and a folder added and removed at the start makes sure the
+    //   group is never empty (undoing an empty group would take back the step before it, e.g. the user's).
     A.run = function (name, logPath, fn, opts) {
         if (typeof logPath === "function") { opts = fn; fn = logPath; logPath = null; }
         opts = opts || {};
         var outer = A._depth === 0;
         var undo = opts.undo !== false && !A._undoOpen;
         var ret, t0 = new Date().getTime(), ok = true;
-        var step = String(name) + (A._runId ? " #" + A._runId : "");
+        var step = String(name), rollback = undo && (opts.rollback !== undefined ? opts.rollback === true : A._rollback === true);
         A._depth++;
         if (outer) { app.beginSuppressDialogs(); }
         if (undo) { app.beginUndoGroup(step); A._undoOpen = true; }
+        if (rollback) { app.project.items.addFolder("__ae_rollback_guard").remove(); }
         try {
             ret = fn(A.log);
         } catch (e) {
@@ -163,10 +166,10 @@ var AE = (function () {
         if (undo) {
             try { app.endUndoGroup(); } catch (e2) { A._buf.push("ERR endUndoGroup " + e2.message); }
             A._undoOpen = false;
-            if (!ok && (opts.rollback || A._rollback)) {
-                // the run id makes the name unique, so this never takes back an earlier step (or one of the user's)
-                A._buf.push(A.undo(step) ? "ROLLED BACK " + step : "WARN could not roll back '" + step + "' (nothing changed, or AE did not list it)");
-            } else if (A._runId) {
+            if (!ok && rollback) {
+                app["executeCommand"](16);   // Edit > Undo; the lint forbids executeCommand in scripts, this is the one checked use
+                A._buf.push("ROLLED BACK " + step);
+            } else {
                 A._buf.push("UNDO " + step);
             }
         }
@@ -190,21 +193,11 @@ var AE = (function () {
     // hooks used by the `ae` CLI wrapper
     A._begin = function (logPath, scriptPath, userOffset, tmp, rollback) {
         if (tmp) { A.tmp = tmp; }
-        A._runId = pad(Math.floor(Math.random() * 65536).toString(16), 4); A._rollback = rollback === true;
+        A._rollback = rollback === true;
         A._buf = []; A._depth = 0; A._undoOpen = false; A.imported = [];
         A._runnerLog = logPath; A._combined = true; A._userOffset = userOffset;
         A.scriptPath = scriptPath;
         A.scriptDir = scriptPath ? String(scriptPath).replace(/\/[^\/]*$/, "") : null;
-    };
-    // Take back the undo step `name` (as logged in "UNDO <name>"), only if it is the last one: AE's Edit menu must
-    // read "Undo <name>". Returns false and does nothing otherwise. Not undoable itself (Redo is, in AE).
-    A.undo = function (name) {
-        if (A._undoOpen) { throw new Error("AE.undo inside an undo group (AE.run): use `ae undo`, or AE.run(..., {rollback: true})"); }
-        var id = 0;
-        try { id = app.findMenuCommandId("Undo " + name); } catch (e) { id = 0; }
-        if (!id) { return false; }
-        app["executeCommand"](id);   // the lint forbids executeCommand in scripts; this call is checked by name
-        return true;
     };
     A._fatal = function (e) {
         A._buf.push("ERR uncaught: " + A.errText(e));
@@ -577,10 +570,6 @@ var AE = (function () {
         if (opts.like) {
             A.copyEase(prop, k, opts.like[0], opts.like[1]);
         }
-        if (opts.interp !== undefined) {
-            var ii = opts.interp instanceof Array ? opts.interp : [opts.interp, opts.interp];
-            prop.setInterpolationTypeAtKey(k, interpType(ii[0]), interpType(ii[1]));
-        }
         if (opts.ease !== undefined) {
             var ee = opts.ease instanceof Array ? opts.ease : [opts.ease, opts.ease];
             try {
@@ -588,6 +577,11 @@ var AE = (function () {
                 if (opts.interp === undefined) { prop.setInterpolationTypeAtKey(k, KeyframeInterpolationType.BEZIER, KeyframeInterpolationType.BEZIER); }
                 prop.setTemporalEaseAtKey(k, easeOf(ee[0], n), easeOf(ee[1], n));
             } catch (e) { A.warn("key ease " + prop.name + " @" + frame + ": " + e.message); }
+        }
+        // after the ease: setting a temporal ease turns a linear/hold side back into bezier
+        if (opts.interp !== undefined) {
+            var ii = opts.interp instanceof Array ? opts.interp : [opts.interp, opts.interp];
+            prop.setInterpolationTypeAtKey(k, interpType(ii[0]), interpType(ii[1]));
         }
         return k;
     };
@@ -1234,11 +1228,12 @@ var AE = (function () {
         }
         try {
             item = rq.items.add(comp);
-            item.timeSpanStart = start;
-            item.timeSpanDuration = dur;
             for (i = 0; i < item.templates.length; i++) {
                 if (item.templates[i] === "Best Settings") { item.applyTemplate("Best Settings"); break; }
             }
+            // after the template: it resets the time span to the comp's length
+            item.timeSpanStart = start;
+            item.timeSpanDuration = dur;
             var om = item.outputModule(1), names = om.templates, pick = null;
             for (var w = 0; w < wanted.length && pick === null; w++) {
                 for (i = 0; i < names.length; i++) { if (wanted[w].test(names[i])) { pick = names[i]; break; } }

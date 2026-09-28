@@ -59,9 +59,6 @@ export interface RunOptions {
   rollback?: boolean; // undo the step right away when the script fails
 }
 
-/** Where the undo steps of the last run are kept, for `ae undo`. */
-export const UNDO_FILE = path.join(WORK, "undo.json");
-
 /**
  * Run a user .jsx in AE. Returns the exit code: 0 ok, 1 an ERR line was logged, 2 lint/syntax error (not run),
  * 3 AE not running / osascript failed / timeout.
@@ -121,8 +118,6 @@ export async function runJsx(user: string, log: string, o: RunOptions): Promise<
   const text = readFileSync(log, "utf8");
   const lines = text.split("\n");
   const failed = lines.some((l) => l.startsWith("ERR"));
-  const steps = lines.filter((l) => l.startsWith("UNDO ")).map((l) => l.slice(5));
-  if (steps.length) writeFileSync(UNDO_FILE, JSON.stringify({ steps }) + "\n");
   if (o.quiet) {
     if (failed) process.stderr.write(text);
   } else {

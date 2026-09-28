@@ -169,12 +169,10 @@ AE.run("aetools test", function (log) {
     check("rebuild swaps every use and keeps the placement", BL2.source === B2 && B2.name === "__aetools_test_build" && AE.comps("__aetools_test_build").length === 1 &&
         B2.parentFolder === TF && Math.round(B2.duration / B2.frameDuration) === 60 && AE.span(BL2) === "in=10 out=40 st=0" && B2.layer("__t2") !== null, AE.span(BL2));
 
-    // ---- copyLayer returns the copy (copyToComp's own index/reference behaviour, pitfall 11); undo checks the name
+    // ---- copyLayer returns the copy (copyToComp's own index/reference behaviour, pitfall 11)
     var nL = c.numLayers, src = AE.layer(c, "__txt"), cp = AE.copyLayer(src, null, { name: "__txt copy" });
     src = AE.layer(c, "__txt");
     check("copyLayer returns the copy, above the source", cp.name === "__txt copy" && c.numLayers === nL + 1 && cp.index === src.index - 1 && AE.getText(cp) === AE.getText(src), [cp.index, src.index]);
-    var threwU = false; try { AE.undo("__aetools no such step"); } catch (eU) { threwU = true; }
-    check("undo refuses inside an undo group", threwU);
 
     // ---- render: 5 frames through the render queue; the user's queue must be left as it was
     var rq = app.project.renderQueue, rqBefore = rq.numItems;

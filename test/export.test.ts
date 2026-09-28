@@ -53,7 +53,7 @@ describe("presets", () => {
   });
 
   it("builds a GIF palette in the filter graph", () => {
-    expect(videoFilter(preset("gif"), 1920, 1080, "pad")).toMatch(/^fps=15,scale=640:-2.*palettegen.*paletteuse/);
+    expect(videoFilter(preset("gif"), 1920, 1080, "pad")).toMatch(/^fps=20,scale=640:-2.*palettegen.*paletteuse/);
   });
 
   it("drops audio when the master has none or the format cannot hold it", () => {
@@ -107,6 +107,7 @@ describe("encode from a master (real ffmpeg)", () => {
     expect(v.pixFmt).toMatch(pix);
     expect(Number(v.duration)).toBeGreaterThan(0.5);
     expect(describeFile(outFile)).toContain(`${w}x${h}`);
+    if (name.includes("alpha")) expect(describeFile(outFile)).toContain("(alpha)");
   });
 
   it("keeps the audio for YouTube", () => {
