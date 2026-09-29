@@ -62,8 +62,8 @@ function exists(p) {
 function abspath(p) {
   return path.isAbsolute(p) ? p : path.join(process.cwd(), p);
 }
-function jsstr(s) {
-  return JSON.stringify(String(s)).replace(/[\u007f-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+function jsstr(s2) {
+  return JSON.stringify(String(s2)).replace(/[\u007f-￿]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
 }
 function basenameNoExt(p) {
   const b = path.basename(p);
@@ -149,11 +149,13 @@ function fft(re, im) {
     }
   }
 }
-function onsets(input, o = {}) {
+function padded(input) {
   const x = new Float32Array(input.length + N);
   x.set(input, N);
+  return x;
+}
+function novelty(x) {
   const frames = Math.max(0, Math.floor((x.length - N) / HOP) + 1);
-  if (frames < 3) return [];
   const win = new Float64Array(N);
   for (let i2 = 0; i2 < N; i2++) win[i2] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i2 / N);
   const re = new Float64Array(N), im = new Float64Array(N);
@@ -165,12 +167,12 @@ function onsets(input, o = {}) {
       im[i2] = 0;
     }
     fft(re, im);
-    let s = 0;
+    let s2 = 0;
     for (let k = 0; k < N / 2; k++) {
       cur[k] = Math.log1p(100 * Math.hypot(re[k], im[k]));
-      if (f > 0 && cur[k] > prev[k]) s += cur[k] - prev[k];
+      if (f > 0 && cur[k] > prev[k]) s2 += cur[k] - prev[k];
     }
-    flux[f] = s;
+    flux[f] = s2;
     [prev, cur] = [cur, prev];
   }
   const w = Math.round(0.25 * SR / HOP);
@@ -181,6 +183,13 @@ function onsets(input, o = {}) {
     while (lo < f - w) acc -= flux[lo++];
     nov[f] = Math.max(0, flux[f] - acc / (hi - lo + 1));
   }
+  return nov;
+}
+function onsets(input, o = {}) {
+  const x = padded(input);
+  const nov = novelty(x);
+  const frames = nov.length;
+  if (frames < 3) return [];
   let max = 0;
   for (const v of nov) max = Math.max(max, v);
   if (max <= 0) return [];
@@ -198,20 +207,20 @@ function onsets(input, o = {}) {
   return out2;
 }
 function attack(x, f) {
-  const B = 64, start = Math.max(B, f * HOP), end = Math.min(x.length - B, f * HOP + N + HOP);
+  const B2 = 64, start = Math.max(B2, f * HOP), end = Math.min(x.length - B2, f * HOP + N + HOP);
   const e = (i2) => {
-    let s = 1e-9;
-    for (let j = i2; j < i2 + B; j++) s += x[j] * x[j];
-    return Math.log(s);
+    let s2 = 1e-9;
+    for (let j = i2; j < i2 + B2; j++) s2 += x[j] * x[j];
+    return Math.log(s2);
   };
-  let best = start, bestRise = -Infinity, prev = e(start - B);
-  for (let i2 = start; i2 <= end; i2 += B / 2) {
+  let best = start, bestRise = -Infinity, prev = e(start - B2);
+  for (let i2 = start; i2 <= end; i2 += B2 / 2) {
     const cur = e(i2);
     if (cur - prev > bestRise) {
       bestRise = cur - prev;
       best = i2;
     }
-    prev = e(i2 - B / 2);
+    prev = e(i2 - B2 / 2);
   }
   return best;
 }
@@ -219,12 +228,51 @@ function loudness(x, step) {
   const n = Math.max(1, Math.round(step * SR));
   const out2 = [];
   for (let i2 = 0; i2 + n <= x.length || i2 === 0 && x.length; i2 += n) {
-    let s = 0;
+    let s2 = 0;
     const end = Math.min(x.length, i2 + n);
-    for (let j = i2; j < end; j++) s += x[j] * x[j];
-    out2.push(10 * Math.log10(s / Math.max(1, end - i2) + 1e-12));
+    for (let j = i2; j < end; j++) s2 += x[j] * x[j];
+    out2.push(10 * Math.log10(s2 / Math.max(1, end - i2) + 1e-12));
   }
   return out2;
+}
+function tempo(input) {
+  const raw = novelty(padded(input));
+  const nov = new Float64Array(raw.length);
+  for (let i2 = 0; i2 < raw.length; i2++) {
+    let s2 = 0;
+    for (let k = -4; k <= 4; k++) s2 += (raw[i2 + k] ?? 0) * (5 - Math.abs(k));
+    nov[i2] = s2 / 25;
+  }
+  const step = HOP / SR;
+  const minLag = Math.floor(60 / 200 / step);
+  const maxLag = Math.ceil(60 / 60 / step);
+  if (nov.length < maxLag * 2.2) return NaN;
+  let mean = 0;
+  for (const v of nov) mean += v;
+  mean /= nov.length;
+  const ac = new Float64Array(maxLag + 2);
+  for (let lag2 = minLag - 1; lag2 <= maxLag + 1; lag2++) {
+    let s2 = 0;
+    for (let i2 = 0; i2 + lag2 < nov.length; i2++) s2 += (nov[i2] - mean) * (nov[i2 + lag2] - mean);
+    ac[lag2] = s2 / (nov.length - lag2);
+  }
+  let best = -Infinity;
+  let bestLag = 0;
+  for (let lag2 = minLag; lag2 <= maxLag; lag2++) {
+    const bpm = 60 / (lag2 * step);
+    const v = ac[lag2] * (bpm >= 80 && bpm <= 160 ? 1 : 0.85);
+    if (v > best) {
+      best = v;
+      bestLag = lag2;
+    }
+  }
+  if (!bestLag || best <= 0) return NaN;
+  const a = ac[bestLag - 1];
+  const b = ac[bestLag];
+  const c = ac[bestLag + 1];
+  const d = a - 2 * b + c;
+  const lag = bestLag + (d < 0 ? 0.5 * (a - c) / d : 0);
+  return Math.round(600 / (lag * step)) / 10;
 }
 
 // src/runner.ts
@@ -281,7 +329,7 @@ function labelFont() {
   return font;
 }
 
-// node_modules/acorn/dist/acorn.mjs
+// node_modules/.pnpm/acorn@8.18.0/node_modules/acorn/dist/acorn.mjs
 var astralIdentifierCodes = [509, 0, 227, 0, 150, 4, 294, 9, 1368, 2, 2, 1, 6, 3, 41, 2, 5, 0, 166, 1, 574, 3, 9, 9, 7, 9, 32, 4, 318, 1, 78, 5, 71, 10, 50, 3, 123, 2, 54, 14, 32, 10, 3, 1, 11, 3, 46, 10, 8, 0, 46, 9, 7, 2, 37, 13, 2, 9, 6, 1, 45, 0, 13, 2, 49, 13, 9, 3, 2, 11, 83, 11, 7, 0, 3, 0, 158, 11, 6, 9, 7, 3, 56, 1, 2, 6, 3, 1, 3, 2, 10, 0, 11, 1, 3, 6, 4, 4, 68, 8, 2, 0, 3, 0, 2, 3, 2, 4, 2, 0, 15, 1, 83, 17, 10, 9, 5, 0, 82, 19, 13, 9, 214, 6, 3, 8, 28, 1, 83, 16, 16, 9, 82, 12, 9, 9, 7, 19, 58, 14, 5, 9, 243, 14, 166, 9, 71, 5, 2, 1, 3, 3, 2, 0, 2, 1, 13, 9, 120, 6, 3, 6, 4, 0, 29, 9, 41, 6, 2, 3, 9, 0, 10, 10, 47, 15, 199, 7, 137, 9, 54, 7, 2, 7, 17, 9, 57, 21, 2, 13, 123, 5, 4, 0, 2, 1, 2, 6, 2, 0, 9, 9, 49, 4, 2, 1, 2, 4, 9, 9, 55, 9, 266, 3, 10, 1, 2, 0, 49, 6, 4, 4, 14, 10, 5350, 0, 7, 14, 11465, 27, 2343, 9, 87, 9, 39, 4, 60, 6, 26, 9, 535, 9, 470, 0, 2, 54, 8, 3, 82, 0, 12, 1, 19628, 1, 4178, 9, 519, 45, 3, 22, 543, 4, 4, 5, 9, 7, 3, 6, 31, 3, 149, 2, 1418, 49, 513, 54, 5, 49, 9, 0, 15, 0, 23, 4, 2, 14, 1361, 6, 2, 16, 3, 6, 2, 1, 2, 4, 101, 0, 161, 6, 10, 9, 357, 0, 62, 13, 499, 13, 245, 1, 2, 9, 233, 0, 3, 0, 8, 1, 6, 0, 475, 6, 110, 6, 6, 9, 4759, 9, 787719, 239];
 var astralIdentifierStartCodes = [0, 11, 2, 25, 2, 18, 2, 1, 2, 14, 3, 13, 35, 122, 70, 52, 268, 28, 4, 48, 48, 31, 14, 29, 6, 37, 11, 29, 3, 35, 5, 7, 2, 4, 43, 157, 19, 35, 5, 35, 5, 39, 9, 51, 13, 10, 2, 14, 2, 6, 2, 1, 2, 10, 2, 14, 2, 6, 2, 1, 4, 51, 13, 310, 10, 21, 11, 7, 25, 5, 2, 41, 2, 8, 70, 5, 3, 0, 2, 43, 2, 1, 4, 0, 3, 22, 11, 22, 10, 30, 66, 18, 2, 1, 11, 21, 11, 25, 7, 25, 39, 55, 7, 1, 65, 0, 16, 3, 2, 2, 2, 28, 43, 28, 4, 28, 36, 7, 2, 27, 28, 53, 11, 21, 11, 18, 14, 17, 111, 72, 56, 50, 14, 50, 14, 35, 39, 27, 10, 22, 251, 41, 7, 1, 17, 5, 57, 28, 11, 0, 9, 21, 43, 17, 47, 20, 28, 22, 13, 52, 58, 1, 3, 0, 14, 44, 33, 24, 27, 35, 30, 0, 3, 0, 9, 34, 4, 0, 13, 47, 15, 3, 22, 0, 2, 0, 36, 17, 2, 24, 20, 1, 64, 6, 2, 0, 2, 3, 2, 14, 2, 9, 8, 46, 39, 7, 3, 1, 3, 21, 2, 6, 2, 1, 2, 4, 4, 0, 19, 0, 13, 4, 31, 9, 2, 0, 3, 0, 2, 37, 2, 0, 26, 0, 2, 0, 45, 52, 19, 3, 21, 2, 31, 47, 21, 1, 2, 0, 185, 46, 42, 3, 37, 47, 21, 0, 60, 42, 14, 0, 72, 26, 38, 6, 186, 43, 117, 63, 32, 7, 3, 0, 3, 7, 2, 1, 2, 23, 16, 0, 2, 0, 95, 7, 3, 38, 17, 0, 2, 0, 29, 0, 11, 39, 8, 0, 22, 0, 12, 45, 20, 0, 19, 72, 200, 32, 32, 8, 2, 36, 18, 0, 50, 29, 113, 6, 2, 1, 2, 37, 22, 0, 26, 5, 2, 1, 2, 31, 15, 0, 24, 43, 261, 18, 16, 0, 2, 12, 2, 33, 125, 0, 80, 921, 103, 110, 18, 195, 2637, 96, 16, 1071, 18, 5, 26, 3994, 6, 582, 6842, 29, 1763, 568, 8, 30, 18, 78, 18, 29, 19, 47, 17, 3, 32, 20, 6, 18, 433, 44, 212, 63, 33, 24, 3, 24, 45, 74, 6, 0, 67, 12, 65, 1, 2, 0, 15, 4, 10, 7381, 42, 31, 98, 114, 8702, 3, 2, 6, 2, 1, 2, 290, 16, 0, 30, 2, 3, 0, 15, 3, 9, 395, 2309, 106, 6, 12, 4, 8, 8, 9, 5991, 84, 2, 70, 2, 1, 3, 0, 3, 1, 3, 3, 2, 11, 2, 0, 2, 6, 2, 64, 2, 3, 3, 7, 2, 6, 2, 27, 2, 3, 2, 4, 2, 0, 4, 6, 2, 339, 3, 24, 2, 24, 2, 30, 2, 24, 2, 30, 2, 24, 2, 30, 2, 24, 2, 30, 2, 24, 2, 7, 1845, 30, 7, 5, 262, 61, 147, 44, 11, 6, 17, 0, 322, 29, 19, 43, 485, 27, 229, 29, 3, 0, 208, 30, 2, 2, 2, 1, 2, 6, 3, 4, 10, 1, 225, 6, 2, 3, 2, 1, 2, 14, 2, 196, 60, 67, 8, 0, 1205, 3, 2, 26, 2, 1, 2, 0, 3, 0, 2, 9, 2, 3, 2, 0, 2, 0, 7, 0, 5, 0, 2, 0, 2, 0, 2, 2, 2, 1, 2, 0, 3, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 1, 2, 0, 3, 3, 2, 6, 2, 3, 2, 3, 2, 0, 2, 9, 2, 16, 6, 2, 2, 4, 2, 16, 4421, 42719, 33, 4381, 3, 5773, 3, 7472, 16, 621, 2467, 541, 1507, 4938, 6, 8489];
 var nonASCIIidentifierChars = "\u200C\u200D\xB7\u0300-\u036F\u0387\u0483-\u0487\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7\u0610-\u061A\u064B-\u0669\u0670\u06D6-\u06DC\u06DF-\u06E4\u06E7\u06E8\u06EA-\u06ED\u06F0-\u06F9\u0711\u0730-\u074A\u07A6-\u07B0\u07C0-\u07C9\u07EB-\u07F3\u07FD\u0816-\u0819\u081B-\u0823\u0825-\u0827\u0829-\u082D\u0859-\u085B\u0897-\u089F\u08CA-\u08E1\u08E3-\u0903\u093A-\u093C\u093E-\u094F\u0951-\u0957\u0962\u0963\u0966-\u096F\u0981-\u0983\u09BC\u09BE-\u09C4\u09C7\u09C8\u09CB-\u09CD\u09D7\u09E2\u09E3\u09E6-\u09EF\u09FE\u0A01-\u0A03\u0A3C\u0A3E-\u0A42\u0A47\u0A48\u0A4B-\u0A4D\u0A51\u0A66-\u0A71\u0A75\u0A81-\u0A83\u0ABC\u0ABE-\u0AC5\u0AC7-\u0AC9\u0ACB-\u0ACD\u0AE2\u0AE3\u0AE6-\u0AEF\u0AFA-\u0AFF\u0B01-\u0B03\u0B3C\u0B3E-\u0B44\u0B47\u0B48\u0B4B-\u0B4D\u0B55-\u0B57\u0B62\u0B63\u0B66-\u0B6F\u0B82\u0BBE-\u0BC2\u0BC6-\u0BC8\u0BCA-\u0BCD\u0BD7\u0BE6-\u0BEF\u0C00-\u0C04\u0C3C\u0C3E-\u0C44\u0C46-\u0C48\u0C4A-\u0C4D\u0C55\u0C56\u0C62\u0C63\u0C66-\u0C6F\u0C81-\u0C83\u0CBC\u0CBE-\u0CC4\u0CC6-\u0CC8\u0CCA-\u0CCD\u0CD5\u0CD6\u0CE2\u0CE3\u0CE6-\u0CEF\u0CF3\u0D00-\u0D03\u0D3B\u0D3C\u0D3E-\u0D44\u0D46-\u0D48\u0D4A-\u0D4D\u0D57\u0D62\u0D63\u0D66-\u0D6F\u0D81-\u0D83\u0DCA\u0DCF-\u0DD4\u0DD6\u0DD8-\u0DDF\u0DE6-\u0DEF\u0DF2\u0DF3\u0E31\u0E34-\u0E3A\u0E47-\u0E4E\u0E50-\u0E59\u0EB1\u0EB4-\u0EBC\u0EC8-\u0ECE\u0ED0-\u0ED9\u0F18\u0F19\u0F20-\u0F29\u0F35\u0F37\u0F39\u0F3E\u0F3F\u0F71-\u0F84\u0F86\u0F87\u0F8D-\u0F97\u0F99-\u0FBC\u0FC6\u102B-\u103E\u1040-\u1049\u1056-\u1059\u105E-\u1060\u1062-\u1064\u1067-\u106D\u1071-\u1074\u1082-\u108D\u108F-\u109D\u135D-\u135F\u1369-\u1371\u1712-\u1715\u1732-\u1734\u1752\u1753\u1772\u1773\u17B4-\u17D3\u17DD\u17E0-\u17E9\u180B-\u180D\u180F-\u1819\u18A9\u1920-\u192B\u1930-\u193B\u1946-\u194F\u19D0-\u19DA\u1A17-\u1A1B\u1A55-\u1A5E\u1A60-\u1A7C\u1A7F-\u1A89\u1A90-\u1A99\u1AB0-\u1ABD\u1ABF-\u1ADD\u1AE0-\u1AEB\u1B00-\u1B04\u1B34-\u1B44\u1B50-\u1B59\u1B6B-\u1B73\u1B80-\u1B82\u1BA1-\u1BAD\u1BB0-\u1BB9\u1BE6-\u1BF3\u1C24-\u1C37\u1C40-\u1C49\u1C50-\u1C59\u1CD0-\u1CD2\u1CD4-\u1CE8\u1CED\u1CF4\u1CF7-\u1CF9\u1DC0-\u1DFF\u200C\u200D\u203F\u2040\u2054\u20D0-\u20DC\u20E1\u20E5-\u20F0\u2CEF-\u2CF1\u2D7F\u2DE0-\u2DFF\u302A-\u302F\u3099\u309A\u30FB\uA620-\uA629\uA66F\uA674-\uA67D\uA69E\uA69F\uA6F0\uA6F1\uA802\uA806\uA80B\uA823-\uA827\uA82C\uA880\uA881\uA8B4-\uA8C5\uA8D0-\uA8D9\uA8E0-\uA8F1\uA8FF-\uA909\uA926-\uA92D\uA947-\uA953\uA980-\uA983\uA9B3-\uA9C0\uA9D0-\uA9D9\uA9E5\uA9F0-\uA9F9\uAA29-\uAA36\uAA43\uAA4C\uAA4D\uAA50-\uAA59\uAA7B-\uAA7D\uAAB0\uAAB2-\uAAB4\uAAB7\uAAB8\uAABE\uAABF\uAAC1\uAAEB-\uAAEF\uAAF5\uAAF6\uABE3-\uABEA\uABEC\uABED\uABF0-\uABF9\uFB1E\uFE00-\uFE0F\uFE20-\uFE2F\uFE33\uFE34\uFE4D-\uFE4F\uFF10-\uFF19\uFF3F\uFF65";
@@ -652,8 +700,8 @@ var defaultOptions = {
 var warnedAboutEcmaVersion = false;
 function getOptions(opts) {
   var options = {};
-  for (var opt in defaultOptions) {
-    options[opt] = opts && hasOwn(opts, opt) ? opts[opt] : defaultOptions[opt];
+  for (var opt2 in defaultOptions) {
+    options[opt2] = opts && hasOwn(opts, opt2) ? opts[opt2] : defaultOptions[opt2];
   }
   if (options.ecmaVersion === "latest") {
     options.ecmaVersion = 1e8;
@@ -3871,27 +3919,27 @@ RegExpValidationState.prototype.raise = function raise(message) {
 };
 RegExpValidationState.prototype.at = function at(i2, forceU) {
   if (forceU === void 0) forceU = false;
-  var s = this.source;
-  var l = s.length;
+  var s2 = this.source;
+  var l = s2.length;
   if (i2 >= l) {
     return -1;
   }
-  var c = s.charCodeAt(i2);
+  var c = s2.charCodeAt(i2);
   if (!(forceU || this.switchU) || c <= 55295 || c >= 57344 || i2 + 1 >= l) {
     return c;
   }
-  var next = s.charCodeAt(i2 + 1);
+  var next = s2.charCodeAt(i2 + 1);
   return next >= 56320 && next <= 57343 ? (c << 10) + next - 56613888 : c;
 };
 RegExpValidationState.prototype.nextIndex = function nextIndex(i2, forceU) {
   if (forceU === void 0) forceU = false;
-  var s = this.source;
-  var l = s.length;
+  var s2 = this.source;
+  var l = s2.length;
   if (i2 >= l) {
     return l;
   }
-  var c = s.charCodeAt(i2), next;
-  if (!(forceU || this.switchU) || c <= 55295 || c >= 57344 || i2 + 1 >= l || (next = s.charCodeAt(i2 + 1)) < 56320 || next > 57343) {
+  var c = s2.charCodeAt(i2), next;
+  if (!(forceU || this.switchU) || c <= 55295 || c >= 57344 || i2 + 1 >= l || (next = s2.charCodeAt(i2 + 1)) < 56320 || next > 57343) {
     return i2 + 1;
   }
   return i2 + 2;
@@ -3936,17 +3984,17 @@ pp$1.validateRegExpFlags = function(state) {
   var u = false;
   var v = false;
   for (var i2 = 0; i2 < flags.length; i2++) {
-    var flag = flags.charAt(i2);
-    if (validFlags.indexOf(flag) === -1) {
+    var flag2 = flags.charAt(i2);
+    if (validFlags.indexOf(flag2) === -1) {
       this.raise(state.start, "Invalid regular expression flag");
     }
-    if (flags.indexOf(flag, i2 + 1) > -1) {
+    if (flags.indexOf(flag2, i2 + 1) > -1) {
       this.raise(state.start, "Duplicate regular expression flag");
     }
-    if (flag === "u") {
+    if (flag2 === "u") {
       u = true;
     }
-    if (flag === "v") {
+    if (flag2 === "v") {
       v = true;
     }
   }
@@ -5978,7 +6026,7 @@ function parse3(input, options) {
   return Parser.parse(input, options);
 }
 
-// node_modules/acorn-walk/dist/walk.mjs
+// node_modules/.pnpm/acorn-walk@8.3.5/node_modules/acorn-walk/dist/walk.mjs
 function simple(node, visitors, baseVisitor, state, override) {
   if (!baseVisitor) {
     baseVisitor = base;
@@ -6497,6 +6545,7 @@ function lint(src, libPath) {
         if (n.operator === "??") at2(n, "error", "?? (ES2020): use (x !== undefined && x !== null ? x : y)");
         return;
       case "AssignmentExpression":
+        if (n.operator === "=" && n.left.type === "MemberExpression" && !n.left.computed && n.left.property.name === "expression") exprRule(n.right);
         if (n.operator === "**=") at2(n, "error", "**= (ES2016): use x = Math.pow(x, y)");
         else if (n.operator === "??=" || n.operator === "||=" || n.operator === "&&=") at2(n, "error", n.operator + " (ES2021): write the assignment out");
         return;
@@ -6534,8 +6583,8 @@ function lint(src, libPath) {
       at2(n, "warning", `reserved word after a dot (.${prop}) works in AE 2026 but is a syntax error in older versions: o["${prop}"] works everywhere`);
     }
     if (obj.type === "Identifier" && obj.name === "AE" && members.size > 0 && !members.has(prop) && !aeAssigned.has(prop)) {
-      const s = suggest(prop, members);
-      at2(n, hasOtherIncludes ? "warning" : "error", `AE.${prop} does not exist in lib.jsx` + (s ? ` (did you mean AE.${s}?)` : "") + ": see the API section of SKILL.md");
+      const s2 = suggest(prop, members);
+      at2(n, hasOtherIncludes ? "warning" : "error", `AE.${prop} does not exist in lib.jsx` + (s2 ? ` (did you mean AE.${s2}?)` : "") + ": see the API section of SKILL.md");
     }
     if (obj.type === "Identifier" && obj.name === "Object" && OBJECT_STATICS.has(prop) && !assignedStatic.has("Object." + prop)) {
       at2(n, "warning", `Object.${prop} is undefined in ExtendScript: use a for (var k in o) loop`);
@@ -6544,11 +6593,21 @@ function lint(src, libPath) {
       at2(n, "warning", `Array.${prop} is undefined in ExtendScript` + (prop === "isArray" ? ": use v instanceof Array" : ""));
     }
   }
+  function exprRule(arg) {
+    if (!arg || arg.type !== "Literal" || typeof arg.value !== "string" || arg.value === "") return;
+    try {
+      parse3(arg.value, { ecmaVersion: "latest", sourceType: "script", allowReturnOutsideFunction: true });
+    } catch (e) {
+      const se = e;
+      at2(arg, "warning", `expression syntax error: ${String(se.message).replace(/\s*\(\d+:\d+\)$/, "")} (line ${se.loc?.line ?? 1} of the expression)`);
+    }
+  }
   function callRules(n) {
     const c = n.callee;
     if (c.type !== "MemberExpression" || c.computed || c.property.type !== "Identifier") return;
     const prop = c.property.name;
     const obj = c.object;
+    if (obj.type === "Identifier" && obj.name === "AE" && prop === "expr") exprRule(n.arguments[1]);
     if (prop === "executeCommand") return at2(n, "error", "app.executeCommand is forbidden: menu commands can open dialogs and act on whatever is selected (pitfall 2)");
     const isAE = obj.type === "Identifier" && (obj.name === "AE" || obj.name === "A");
     if (!isAE && Object.prototype.hasOwnProperty.call(ES5_METHODS, prop) && !assignedProto.has(prop)) {
@@ -6716,12 +6775,15 @@ async function runJsx(user, log, o) {
   }
   const lib = readFileSync2(LIB, "utf8");
   const offset2 = (lib.match(/\n/g)?.length ?? 0) + 1;
+  if (o.diff) for (const f of [o.diff.before, o.diff.after]) rmSync(f, { force: true });
+  const before = o.diff ? `AE._snapshotTo(${jsstr(o.diff.before)});` : "";
+  const after = (o.exprCheck ? "AE._checkExprs();" : "") + (o.diff ? `AE._snapshotTo(${jsstr(o.diff.after)});` : "");
   writeFileSync2(
     combined,
-    "try{" + lib + `AE._begin(${jsstr(log)}, ${jsstr(user)}, ${offset2}, ${jsstr(WORK)}, ${o.rollback === true});AE.run(${jsstr(o.label)}, function (log) {
+    "try{" + lib + `AE._begin(${jsstr(log)}, ${jsstr(user)}, ${offset2}, ${jsstr(WORK)}, ${o.rollback === true});${before}AE.run(${jsstr(o.label)}, function (log) {
 ` + readFileSync2(prepped, "utf8") + `
 }, {undo: ${o.undo}, silent: true});
-AE._end();
+${after}AE._end();
 }catch(__e){var __f=new File(${jsstr(log)});__f.encoding="UTF-8";__f.lineFeed="Unix";__f.open("w");__f.write("ERR fatal (lib/wrapper): "+__e.message+" line "+__e.line+"\\n");__f.close();}
 `
   );
@@ -6781,7 +6843,7 @@ function readLog(log) {
 }
 
 // src/commands/beats.ts
-var USAGE = 'usage: ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]\n       ae beats file.wav [--fps 25] [--offset F] [...]   (no AE: the file starts at comp frame --offset)';
+var USAGE = 'usage: ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env] [--mark [--label 0-16]]\n       ae beats file.wav [--fps 25] [--offset F] [...]   (no AE: the file starts at comp frame --offset)';
 function analyse(pl, o) {
   const from = Math.max(o.from ?? pl.inF, pl.inF);
   const to = Math.min(o.to ?? pl.outF, pl.outF);
@@ -6796,15 +6858,18 @@ function analyse(pl, o) {
   for (const h of hits) h.strength = max > 0 ? h.strength / max : 0;
   const body = x.subarray(Math.round(pre * SR));
   const env = o.env ? loudness(body, 1 / pl.fps / pl.stretch).map((db, i2) => ({ frame: Math.round(toFrame(i2 / pl.fps / pl.stretch)), db })) : [];
-  return { from, to, hits, env };
+  const bpm = tempo(x) / pl.stretch;
+  return { from, to, hits, env, bpm: isNaN(bpm) ? NaN : Math.round(bpm * 10) / 10 };
 }
 async function cmdBeats(argv) {
-  const p = parseArgs(argv, "beats", ["--layer", "--from", "--to", "--fps", "--offset", "--top", "--min-gap", "--threshold"], ["--env"]);
+  const p = parseArgs(argv, "beats", ["--layer", "--from", "--to", "--fps", "--offset", "--top", "--min-gap", "--threshold", "--label"], ["--env", "--mark"]);
   const target = p.pos[0];
   if (!target || p.pos.length > 1) die(USAGE);
   const threshold = str(p, "--threshold") ? Number(str(p, "--threshold")) : void 0;
   if (threshold !== void 0 && !(threshold > 0 && threshold < 1)) die("--threshold must be between 0 and 1");
-  const opt = (name) => p.opts[name] === void 0 ? void 0 : int(p, name, 0);
+  const opt2 = (name) => p.opts[name] === void 0 ? void 0 : int(p, name, 0);
+  if (p.opts["--mark"] && !p.opts["--layer"]) die('beats: --mark puts markers on the audio layer: ae beats "Comp" --layer "Music" --mark');
+  if (p.opts["--label"] !== void 0 && !p.opts["--mark"]) die("beats: --label goes with --mark");
   let pl;
   let where;
   if (!p.opts["--layer"]) {
@@ -6837,29 +6902,41 @@ log("PLACE " + [c.frameRate, L.startTime, L.stretch, L.inPoint, L.outPoint, L.ti
     pl = { file, fps, start, stretch: stretch / 100, inF: Math.round(inP * fps), outF: Math.round(outP * fps) };
     where = `frames of '${target}' (layer starts at ${Math.round(start * fps)}${stretch !== 100 ? `, stretch ${stretch}%` : ""})`;
   }
-  const res = analyse(pl, { from: opt("--from"), to: opt("--to"), minGap: opt("--min-gap"), threshold, env: !!p.opts["--env"] });
+  const res = analyse(pl, { from: opt2("--from"), to: opt2("--to"), minGap: opt2("--min-gap"), threshold, env: !!p.opts["--env"] });
   let hits = res.hits;
-  const top = opt("--top");
+  const top = opt2("--top");
   if (top !== void 0) hits = [...hits].sort((a, b) => b.strength - a.strength).slice(0, top).sort((a, b) => a.frame - b.frame);
   err(`ae: ${hits.length} onsets, ${where}, ${res.from}..${res.to}; strength 0..1 (1 = strongest here)`);
+  if (!isNaN(res.bpm)) err(`ae: tempo ~${res.bpm} BPM, a beat every ${+(60 / res.bpm * pl.fps).toFixed(2)} frames (could also be half or double)`);
   for (const h of hits) out(`${String(h.frame).padStart(6)}  ${h.strength.toFixed(2)}  ${"#".repeat(Math.max(1, Math.round(h.strength * 20)))}`);
   if (p.opts["--env"]) {
     const max = Math.max(...res.env.map((e) => e.db));
     out("frame  dBFS  loudness");
     for (const e of res.env) out(`${String(e.frame).padStart(6)}  ${e.db.toFixed(1).padStart(5)}  ${"=".repeat(Math.max(0, Math.round((e.db - max + 40) / 2)))}`);
   }
+  if (p.opts["--mark"] && hits.length) return markBeats(target, str(p, "--layer"), hits, opt2("--label"));
   return 0;
+}
+async function markBeats(comp, layer, hits, label) {
+  const code = `var __L = AE.layer(AE.comp(${jsstr(comp)}), ${jsstr(layer)});
+var __f = [${hits.map((h) => h.frame).join(",")}], __s = [${hits.map((h) => h.strength.toFixed(2)).join(",")}];
+for (var __i = 0; __i < __f.length; __i++) { AE.marker(__L, __f[__i], "beat " + __s[__i]${label === void 0 ? "" : `, {label: ${label}}`}); }
+log(__f.length + " beat marker(s) on '" + __L.name + "'");
+`;
+  const r = await runSnippet("beats", "mark", code, { undo: true, label: "ae beats", rollback: true, quiet: true });
+  if (!r.code) err(readLog(r.log).split("\n").find((l) => l.includes("beat marker")) ?? "");
+  return r.code;
 }
 
 // src/commands/export.ts
-import { readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import path6 from "node:path";
 
 // src/media.ts
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { mkdirSync as mkdirSync2 } from "node:fs";
 import path5 from "node:path";
-var safeLabel = (s) => s.replace(/[^A-Za-z0-9 ._#=+-]/g, "_");
+var safeLabel = (s2) => s2.replace(/[^A-Za-z0-9 ._#=+-]/g, "_");
 function makeSheet(outFile, cols, cellWidth, cells) {
   need("ffmpeg");
   need("ffprobe");
@@ -6876,15 +6953,20 @@ function makeSheet(outFile, cols, cellWidth, cells) {
   const filters = [];
   const layout = [];
   let stack = "";
+  const sq = Math.max(8, Math.round(cellWidth / 48));
+  const g = (v) => `'if(mod(floor(X/${sq})+floor(Y/${sq}),2),${v},${v - 48})'`;
+  const bgs = cells.map((_, i2) => `[bg${i2}]`).join("");
+  filters.push(`color=c=gray:s=${cellWidth}x${ch}:d=1,format=rgb24,geq=r=${g(150)}:g=${g(150)}:b=${g(150)}${cells.length > 1 ? `,split=${cells.length}` : ""}${bgs}`);
   cells.forEach((c, i2) => {
     inputs.push("-i", c.file);
     const dt = font2 ? `,drawtext=fontfile='${font2}':text='${safeLabel(c.label)}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=5` : "";
-    filters.push(`[${i2}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,pad=${cellWidth}:${ch}:(ow-iw)/2:(oh-ih)/2:color=black${dt}[v${i2}]`);
+    filters.push(`[${i2}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,format=rgba[s${i2}]`);
+    filters.push(`[bg${i2}][s${i2}]overlay=(W-w)/2:(H-h)/2:format=auto,format=rgb24${dt}[v${i2}]`);
     layout.push(`${i2 % cols * cellWidth}_${Math.floor(i2 / cols) * ch}`);
     stack += `[v${i2}]`;
   });
   let fc;
-  if (cells.length === 1) fc = filters[0].replace(/\[v0\]$/, "[out]");
+  if (cells.length === 1) fc = filters.join(";").replace(/\[v0\]$/, "[out]");
   else fc = filters.join(";") + `;${stack}xstack=inputs=${cells.length}:layout=${layout.join("|")}:fill=black[out]`;
   mkdirSync2(path5.dirname(outFile), { recursive: true });
   const r = run("ffmpeg", ["-v", "error", "-y", ...inputs, "-filter_complex", fc, "-map", "[out]", "-frames:v", "1", "-update", "1", outFile], { stdio: ["ignore", "inherit", "inherit"] });
@@ -6966,8 +7048,8 @@ function measureInk(img, o = {}) {
     }
   }
   if (!count) return null;
-  const hex = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase()).join("");
-  return { x0, y0, x1, y1, count, mean: [r / count, g / count, b / count], bg: alpha && !o.bg ? "transparent" : hex(bg) };
+  const hex2 = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0").toUpperCase()).join("");
+  return { x0, y0, x1, y1, count, mean: [r / count, g / count, b / count], bg: alpha && !o.bg ? "transparent" : hex2(bg) };
 }
 function cropFilter(region, scale, imgW, imgH) {
   const [x, y, w, h] = region.map((v) => v * scale);
@@ -7077,10 +7159,10 @@ function ffmpegArgs(p, input, output, o) {
 }
 
 // src/commands/export.ts
-var USAGE2 = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--ame [--wait]]   (presets: ae export --list)';
+var USAGE2 = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--quick [--res full|half|third|quarter]] [--ame [--wait]]   (presets: ae export --list)';
 var RENDER_TIMEOUT = 3600;
 async function cmdExport(argv) {
-  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list"]);
+  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout", "--res"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list", "--quick"]);
   if (p.opts["--list"]) {
     out(listPresets());
     return 0;
@@ -7095,6 +7177,10 @@ async function cmdExport(argv) {
   const to = frameOpt(p.opts["--to"], "--to");
   if (p.opts["--full"] && (from !== void 0 || to !== void 0)) die("--full and --from/--to exclude each other");
   if (p.opts["--wait"] && !p.opts["--ame"]) die("--wait only goes with --ame");
+  if (p.opts["--quick"] && p.opts["--ame"]) die("--quick and --ame exclude each other");
+  if (p.opts["--res"] && !p.opts["--quick"]) die("--res only goes with --quick (a render-queue export is always full size)");
+  const res = str(p, "--res", "full");
+  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : RENDER_TIMEOUT;
   if (!(timeout > 0)) die("--timeout must be a number of seconds");
   const safe = comp.replace(/[^\p{L}\p{N}_-]+/gu, "_");
@@ -7106,8 +7192,14 @@ async function cmdExport(argv) {
   need("ffmpeg");
   need("ffprobe");
   const master = path6.join(WORK, "export", `${safe}_${preset.name}_master.mov`);
-  err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
-  const rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  let rendered;
+  if (p.opts["--quick"]) {
+    err(`ae: snapping '${comp}' frame by frame (quick: no render queue, no audio)...`);
+    rendered = await snapMaster(comp, master, span, res, p.opts["--timeout"] ? timeout : void 0);
+  } else {
+    err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
+    rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  }
   if (typeof rendered === "number") return rendered;
   err(`ae: encoding ${preset.name}...`);
   const code = encode(preset, rendered, target, fit, true);
@@ -7146,6 +7238,42 @@ async function renderInAe(comp, file, o, timeout) {
     return 1;
   }
   return written;
+}
+async function snapMaster(comp, file, span, res, timeout) {
+  const dir = path6.join(WORK, "export", "quick");
+  mkdirSync3(dir, { recursive: true });
+  for (const f of readdirSync2(dir)) if (/^q_f\d+\.png$/.test(f)) rmSync2(path6.join(dir, f), { force: true });
+  const range = span.from !== void 0 || span.to !== void 0 ? `a = ${span.from ?? 0}; b = ${span.to === void 0 ? "Math.round(c.duration / fd) - 1" : span.to};` : span.full ? "a = 0; b = Math.round(c.duration / fd) - 1;" : "a = Math.round(c.workAreaStart / fd); b = Math.round((c.workAreaStart + c.workAreaDuration) / fd) - 1;";
+  const code = `var c = AE.comp(${jsstr(comp)}), fd = c.frameDuration, a, b, fr = [];
+${range}
+if (b < a) { throw new Error("export: empty frame range " + a + ".." + b); }
+if (b - a > 3000) { throw new Error("export --quick: " + (b - a + 1) + " frames is too many; use the render queue (no --quick)"); }
+for (var f = a; f <= b; f++) { fr.push(f); }
+log("FPS " + c.frameRate);
+AE.snap(c, fr, ${jsstr(dir)}, "q", ${jsstr(res)});
+`;
+  const r = await runSnippet("export", "quick", code, { undo: false, label: "ae export", quiet: true, snapTimeout: timeout ?? Math.max(SNAP_TIMEOUT, 600) });
+  if (r.code) return r.code;
+  const log = readLog(r.log).split("\n");
+  const pngs = log.filter((l) => l.startsWith("PNG ")).map((l) => l.slice(4));
+  const fps = Number(log.find((l) => l.startsWith("FPS "))?.slice(4));
+  if (!pngs.length || !(fps > 0)) {
+    err(`ae: no frames came back (log: ${r.log})`);
+    return 1;
+  }
+  const list2 = path6.join(dir, "list.txt");
+  const q = (f) => "file '" + f.replace(/'/g, "'\\''") + "'";
+  writeFileSync3(list2, "ffconcat version 1.0\n" + pngs.map((f) => `${q(f)}
+duration ${(1 / fps).toFixed(6)}
+`).join(""));
+  const m = run("ffmpeg", ["-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", list2, "-frames:v", String(pngs.length), "-r", String(fps), "-c:v", "png", "-pix_fmt", "rgba", file], { stdio: ["ignore", "inherit", "inherit"] });
+  for (const f of pngs) rmSync2(f, { force: true });
+  if (m.status !== 0 || !isFile(file)) {
+    err(`ae: ffmpeg could not join the ${pngs.length} frames`);
+    return 1;
+  }
+  err(`ae: ${pngs.length} frames at ${+fps.toFixed(3)} fps`);
+  return file;
 }
 function encode(preset, input, output, fit, stats = false) {
   const v = probeVideo(input);
@@ -7217,11 +7345,11 @@ async function exportWithAme(comp, preset, target, span, timeout, wait) {
 }
 
 // src/commands/inspect.ts
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync3, renameSync } from "node:fs";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync3, renameSync } from "node:fs";
 import path8 from "node:path";
 
 // src/commands/media.ts
-import { mkdirSync as mkdirSync3, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
+import { mkdirSync as mkdirSync4, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
 import path7 from "node:path";
 async function cmdSheet(argv) {
   const p = parseArgs(argv, "sheet", ["--cols", "--width"]);
@@ -7240,10 +7368,10 @@ async function cmdProbe(argv) {
   const v = probeVideo(vid);
   const rot = run("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream_side_data=rotation", "-of", "default=nw=1:nk=1", vid]).stdout.split("\n")[0].trim();
   const aud = run("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0", vid]).stdout.split("\n")[0].trim();
-  const fmt = (n) => isNaN(n) ? "?" : n.toFixed(3);
+  const fmt2 = (n) => isNaN(n) ? "?" : n.toFixed(3);
   out(`file=${vid}`);
   out(`width=${v.width} height=${v.height}${rot ? " rotation=" + rot : ""}`);
-  out(`fps=${fmt(rate(v.avgFrameRate))} (avg_frame_rate=${v.avgFrameRate} r_frame_rate=${v.rFrameRate} = ${fmt(rate(v.rFrameRate))})${v.avgFrameRate !== v.rFrameRate ? "  VFR?" : ""}`);
+  out(`fps=${fmt2(rate(v.avgFrameRate))} (avg_frame_rate=${v.avgFrameRate} r_frame_rate=${v.rFrameRate} = ${fmt2(rate(v.rFrameRate))})${v.avgFrameRate !== v.rFrameRate ? "  VFR?" : ""}`);
   out(`duration=${v.duration}s frames=${v.nbFrames || "?"} codec=${v.codec} audio=${aud || "none"}`);
   const fps = str(p, "--fps");
   const dur = Number(v.duration);
@@ -7264,7 +7392,7 @@ async function cmdFrames(argv) {
   const fps = rate(v.avgFrameRate);
   const base2 = basenameNoExt(vid).replace(/[^A-Za-z0-9_-]/g, "_");
   const dir = path7.join(WORK, "frames", base2);
-  mkdirSync3(dir, { recursive: true });
+  mkdirSync4(dir, { recursive: true });
   for (const f of readdirSync3(dir)) if (/^cell_.*\.png$/.test(f)) rmSync3(path7.join(dir, f), { force: true });
   const sheet = abspath(str(p, "--out") || path7.join(WORK, "frames", base2 + "_sheet.png"));
   const cells = [];
@@ -7308,15 +7436,15 @@ async function cmdMeasure(argv) {
   out(ka ? inkLine(a, ka) : `${a}: no ink`);
   if (!b) return 0;
   const ib = readRgba(b);
-  const s = ia.w / ib.w;
-  const kb = measureInk(ib, { bg, threshold, box: box?.map((v) => v / s) });
+  const s2 = ia.w / ib.w;
+  const kb = measureInk(ib, { bg, threshold, box: box?.map((v) => v / s2) });
   out(kb ? inkLine(b, kb) : `${b}: no ink`);
   if (!ka || !kb) return 0;
   const c = (k, f) => [(k.x0 + k.x1 + 1) / 2 * f, (k.y0 + k.y1 + 1) / 2 * f, (k.x1 - k.x0 + 1) * f, (k.y1 - k.y0 + 1) * f];
   const [ax, ay, aw, ah] = c(ka, 1);
-  const [bx, by, bw, bh] = c(kb, s);
+  const [bx, by, bw, bh] = c(kb, s2);
   const sg = (n) => (n >= 0 ? "+" : "") + f1(n);
-  out(`delta b-a${s !== 1 ? ` (b scaled x${f1(s)} to a's pixels)` : ""}: centre ${sg(bx - ax)},${sg(by - ay)}  size ${sg(bw - aw)}x${sg(bh - ah)}`);
+  out(`delta b-a${s2 !== 1 ? ` (b scaled x${f1(s2)} to a's pixels)` : ""}: centre ${sg(bx - ax)},${sg(by - ay)}  size ${sg(bw - aw)}x${sg(bh - ah)}`);
   return 0;
 }
 
@@ -7354,37 +7482,43 @@ function parseFrames(spec) {
   if (!res.length) bad();
   return res;
 }
-async function cmdSnap(argv) {
-  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout", "--crop"], ["--sheet"]);
-  const [comp, spec] = p.pos;
-  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]');
-  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
-  const res = str(p, "--res", "half");
-  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
-  const frames = parseFrames(spec);
-  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = abspath(str(p, "--out") || path8.join(WORK, "snap", prefix));
-  mkdirSync4(dir, { recursive: true });
+var RES = ["full", "half", "third", "quarter"];
+async function snapFrames(comp, frames, dir, prefix, res, crop, snapTimeout) {
+  mkdirSync5(dir, { recursive: true });
   const code = `var c = AE.comp(${jsstr(comp)});
 log("SIZE " + c.width);
 AE.snap(c, [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});
 `;
-  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout: p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0 });
-  if (r.code) return r.code;
+  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout });
   const cells = [];
+  if (r.code) return { code: r.code, cells };
   const log = readLog(r.log).split("\n");
   const compW = Number(log.find((l) => l.startsWith("SIZE "))?.slice(5));
   for (const line of log) {
     if (!line.startsWith("PNG ")) continue;
     const file = line.slice(4);
     if (crop) cropPng(file, crop, compW);
-    out(file);
     const m = /_f(\d+)\.png$/.exec(file);
     cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
   }
-  if (p.opts["--sheet"] && cells.length) {
+  return { code: 0, cells };
+}
+async function cmdSnap(argv) {
+  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout", "--crop"], ["--sheet"]);
+  const [comp, spec] = p.pos;
+  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]');
+  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
+  const res = str(p, "--res", "half");
+  if (!RES.includes(res)) die("--res must be full|half|third|quarter");
+  const frames = parseFrames(spec);
+  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
+  const dir = abspath(str(p, "--out") || path8.join(WORK, "snap", comp.replace(/[^A-Za-z0-9_-]/g, "_")));
+  const r = await snapFrames(comp, frames, dir, prefix, res, crop, p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0);
+  if (r.code) return r.code;
+  for (const c of r.cells) out(c.file);
+  if (p.opts["--sheet"] && r.cells.length) {
     const sheet = path8.join(dir, prefix + "_sheet.png");
-    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), cells);
+    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), r.cells);
     out("SHEET " + sheet);
   }
   return 0;
@@ -7399,7 +7533,7 @@ function cropPng(file, region, compW) {
 }
 
 // src/commands/save.ts
-import { copyFileSync, mkdirSync as mkdirSync5, statSync as statSync4, utimesSync } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync6, statSync as statSync4, utimesSync } from "node:fs";
 import path9 from "node:path";
 var logValue = (log, key) => (readLog(log).split("\n").find((l) => l.startsWith(key + " ")) ?? "").slice(key.length + 1);
 async function cmdSave(argv) {
@@ -7433,10 +7567,10 @@ async function cmdSave(argv) {
     const ext = path9.extname(name);
     const dest = path9.join(path9.dirname(project), "Backups", `${name.slice(0, name.length - ext.length)}-${stamp(/* @__PURE__ */ new Date())}${ext}`);
     try {
-      mkdirSync5(path9.dirname(dest), { recursive: true });
+      mkdirSync6(path9.dirname(dest), { recursive: true });
       copyFileSync(project, dest);
-      const s2 = statSync4(project);
-      utimesSync(dest, s2.atime, s2.mtime);
+      const s3 = statSync4(project);
+      utimesSync(dest, s3.atime, s3.mtime);
     } catch {
       die(`backup failed (${dest}); not saved`);
     }
@@ -7450,8 +7584,8 @@ async function cmdSave(argv) {
     err(`ae: save did not confirm (log: ${sv.log})`);
     return 1;
   }
-  const s = statSync4(saved);
-  out(`saved: ${saved} (${humanSize(s.size)}, ${s.mtime.toTimeString().slice(0, 8)})`);
+  const s2 = statSync4(saved);
+  out(`saved: ${saved} (${humanSize(s2.size)}, ${s2.mtime.toTimeString().slice(0, 8)})`);
   if (logValue(sv.log, "DIRTY") !== "false") err("ae: warning: AE still reports unsaved changes");
   return 0;
 }
@@ -7470,14 +7604,117 @@ function humanSize(n) {
 }
 
 // src/commands/script.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import path10 from "node:path";
+
+// src/diff.ts
+function parseSnapshot(text) {
+  const snap = { items: [], comps: /* @__PURE__ */ new Map() };
+  let comp = null;
+  let layer = null;
+  let inItems = false;
+  for (const line of text.split("\n")) {
+    if (line === "@I") {
+      inItems = true;
+    } else if (line.startsWith("@C ")) {
+      inItems = false;
+      const sp = line.indexOf(" ", 3);
+      comp = { header: line.slice(sp + 1), markers: [], layers: /* @__PURE__ */ new Map() };
+      snap.comps.set(line.slice(3, sp), comp);
+      layer = null;
+    } else if (line.startsWith("@L ") && comp) {
+      let key = line.slice(3);
+      while (comp.layers.has(key)) key += "'";
+      layer = [];
+      comp.layers.set(key, layer);
+    } else if (inItems) {
+      if (line) snap.items.push(line);
+    } else if (layer) {
+      layer.push(line);
+    } else if (comp && line.startsWith("marker ")) {
+      comp.markers.push(line);
+    }
+  }
+  return snap;
+}
+function lineDiff(a, b) {
+  if (a.length * b.length > 4e6) {
+    const sa = new Set(a);
+    const sb = new Set(b);
+    return [...a.filter((l) => !sb.has(l)).map((l) => "- " + l), ...b.filter((l) => !sa.has(l)).map((l) => "+ " + l)];
+  }
+  const n = a.length;
+  const m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i3 = n - 1; i3 >= 0; i3--) for (let j2 = m - 1; j2 >= 0; j2--) dp[i3][j2] = a[i3] === b[j2] ? dp[i3 + 1][j2 + 1] + 1 : Math.max(dp[i3 + 1][j2], dp[i3][j2 + 1]);
+  const res = [];
+  let i2 = 0;
+  let j = 0;
+  while (i2 < n && j < m) {
+    if (a[i2] === b[j]) {
+      i2++;
+      j++;
+    } else if (dp[i2 + 1][j] >= dp[i2][j + 1]) res.push("- " + a[i2++]);
+    else res.push("+ " + b[j++]);
+  }
+  while (i2 < n) res.push("- " + a[i2++]);
+  while (j < m) res.push("+ " + b[j++]);
+  return res;
+}
+var compName = (header) => /^COMP ('.*?') id=/.exec(header)?.[1] ?? header;
+function diffSnapshots(before, after) {
+  const out2 = [];
+  const items = lineDiff(before.items, after.items);
+  if (items.length) out2.push("project items:", ...items.map((l) => "  " + l));
+  for (const [id, a] of before.comps) {
+    if (!after.comps.has(id)) out2.push(`- comp ${compName(a.header)} id=${id} (removed, ${a.layers.size} layers)`);
+  }
+  for (const [id, b] of after.comps) {
+    const a = before.comps.get(id);
+    if (!a) {
+      out2.push(`+ comp ${compName(b.header)} id=${id} (new)`);
+      for (const lines of b.layers.values()) out2.push("    + " + lines[0].trim());
+      continue;
+    }
+    const body = [];
+    if (a.header !== b.header) body.push("  - " + a.header, "  + " + b.header);
+    for (const l of lineDiff(a.markers, b.markers)) body.push("  " + l);
+    for (const [key, la] of a.layers) if (!b.layers.has(key)) body.push("  - " + la[0].trim() + "  (removed)");
+    const moved = [];
+    for (const [key, lb] of b.layers) {
+      const la = a.layers.get(key);
+      if (!la) {
+        body.push("  + " + lb[0].trim() + "  (new)");
+        continue;
+      }
+      const ia = /^#(\d+) /.exec(la[0])?.[1];
+      const ib = /^#(\d+) /.exec(lb[0])?.[1];
+      const d = lineDiff([la[0].replace(/^#\d+ /, ""), ...la.slice(1)], [lb[0].replace(/^#\d+ /, ""), ...lb.slice(1)]);
+      if (ia !== ib) moved.push(`${/^#\d+ ('.*?') \[/.exec(lb[0])?.[1] ?? key} #${ia}->#${ib}`);
+      if (!d.length) continue;
+      body.push("  ~ " + lb[0].trim());
+      for (const l of d) body.push("      " + l.slice(0, 2) + l.slice(2).trim());
+    }
+    if (moved.length) body.push("  layer order: " + moved.join(", "));
+    if (body.length) out2.push(`comp ${compName(b.header)} id=${id}:`, ...body);
+  }
+  return out2;
+}
+
+// src/commands/script.ts
 async function cmdRun(argv) {
-  const p = parseArgs(argv, "run", ["--log", "--timeout"], ["--ro", "--undo", "--no-rollback"]);
+  const usage = "usage: ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s] [--diff] [--ab Comp --frames 0,30,60 [--res r] [--crop x,y,w,h] [--cols N] [--width px]]";
+  const p = parseArgs(argv, "run", ["--log", "--timeout", "--ab", "--frames", "--res", "--crop", "--cols", "--width"], ["--ro", "--undo", "--no-rollback", "--diff"]);
   let script = p.pos[p.pos.length - 1] ?? "";
-  if (!script) die("usage: ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]");
+  if (!script) die(usage);
   if (!isFile(script)) die("no such file: " + script);
   script = abspath(script);
+  const ab = str(p, "--ab");
+  if (!!ab !== !!str(p, "--frames")) die("--ab and --frames go together: " + usage);
+  const frames = ab ? parseFrames(str(p, "--frames")) : [];
+  const res = str(p, "--res", "half");
+  if (!RES.includes(res)) die("--res must be full|half|third|quarter");
+  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
   let log = str(p, "--log");
   if (!log) {
     log = script.startsWith(TOOLS + path10.sep) ? path10.join(WORK, "logs", path10.basename(script).replace(/\.jsx$/, "") + ".log") : script.replace(/\.jsx$/, "") + ".log";
@@ -7488,7 +7725,34 @@ async function cmdRun(argv) {
   else if (p.opts["--undo"]) undo = true;
   else undo = !/AE\.(run|peek)\s*\(|app\.beginUndoGroup\s*\(/.test(readFileSync4(script, "utf8"));
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0;
-  return runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: !p.opts["--no-rollback"] });
+  const abDir = path10.join(WORK, "ab", ab.replace(/[^A-Za-z0-9_-]/g, "_"));
+  let beforeCells = [];
+  if (ab) {
+    const b = await snapFrames(ab, frames, abDir, "before", res, crop);
+    if (b.code) return b.code;
+    beforeCells = b.cells;
+  }
+  const diffDir = path10.join(WORK, "diff");
+  const diff = p.opts["--diff"] ? { before: path10.join(diffDir, "before.txt"), after: path10.join(diffDir, "after.txt") } : void 0;
+  if (diff) mkdirSync7(diffDir, { recursive: true });
+  const code = await runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: !p.opts["--no-rollback"], exprCheck: !p.opts["--ro"], diff });
+  if (diff && (code === 0 || code === 1) && isFile(diff.before) && isFile(diff.after)) {
+    const lines = diffSnapshots(parseSnapshot(readFileSync4(diff.before, "utf8")), parseSnapshot(readFileSync4(diff.after, "utf8")));
+    out(lines.length ? "DIFF\n" + lines.join("\n") : "DIFF no changes");
+  }
+  if (ab && code === 0) {
+    const a = await snapFrames(ab, frames, abDir, "after", res, crop);
+    if (a.code) return a.code;
+    const cells = [];
+    beforeCells.forEach((c, i2) => {
+      cells.push({ label: "before " + c.label, file: c.file });
+      if (a.cells[i2]) cells.push({ label: "after " + a.cells[i2].label, file: a.cells[i2].file });
+    });
+    const sheet = path10.join(abDir, "ab_sheet.png");
+    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 480), cells);
+    out("SHEET " + sheet);
+  }
+  return code;
 }
 async function cmdEval(argv) {
   const undo = !argv.includes("--ro");
@@ -7496,14 +7760,14 @@ async function cmdEval(argv) {
   const code = argv.filter((a) => a !== "--ro" && a !== "--no-rollback").join("\n");
   if (!code) die("usage: ae eval 'js code' [--ro] [--no-rollback]   (the value of the last expression is logged)");
   const dir = path10.join(WORK, "eval");
-  mkdirSync6(dir, { recursive: true });
+  mkdirSync7(dir, { recursive: true });
   const f = path10.join(dir, "eval.jsx");
-  writeFileSync3(f, evalScript(code));
-  return runJsx(f, path10.join(dir, "eval.log"), { undo, label: "ae eval", rollback });
+  writeFileSync4(f, evalScript(code));
+  return runJsx(f, path10.join(dir, "eval.log"), { undo, label: "ae eval", rollback, exprCheck: undo });
 }
 async function cmdCheck(argv) {
   if (!argv.length) die("usage: ae check script.jsx [more.jsx ...]");
-  mkdirSync6(path10.join(WORK, "run"), { recursive: true });
+  mkdirSync7(path10.join(WORK, "run"), { recursive: true });
   let code = 0;
   for (const f of argv) {
     if (!isFile(f)) {
@@ -7519,7 +7783,7 @@ async function cmdCheck(argv) {
 }
 
 // src/commands/setup.ts
-import { mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync8, readdirSync as readdirSync4, readFileSync as readFileSync5 } from "node:fs";
 import os from "node:os";
 import path11 from "node:path";
 async function cmdDoctor() {
@@ -7540,7 +7804,7 @@ async function cmdDoctor() {
     else warn(`${tool} not found (needed by snap --sheet, sheet, frames, probe, selftest): brew install ffmpeg`);
   }
   try {
-    mkdirSync7(WORK, { recursive: true });
+    mkdirSync8(WORK, { recursive: true });
     ok("work dir " + WORK);
   } catch {
     fail(`cannot write the work dir ${WORK} (set AE_TMP)`);
@@ -7603,8 +7867,8 @@ function prefsFile(app2) {
 async function captureStderr(fn) {
   const orig = process.stderr.write.bind(process.stderr);
   let buf = "";
-  process.stderr.write = ((chunk) => {
-    buf += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString();
+  process.stderr.write = ((chunk2) => {
+    buf += typeof chunk2 === "string" ? chunk2 : Buffer.from(chunk2).toString();
     return true;
   });
   try {
@@ -7620,7 +7884,7 @@ async function cmdSelftest(argv) {
     return 3;
   }
   need("ffmpeg");
-  mkdirSync7(path11.join(WORK, "logs"), { recursive: true });
+  mkdirSync8(path11.join(WORK, "logs"), { recursive: true });
   const clip = path11.join(WORK, "__aetools_clip.mp4");
   if (!isFile(clip)) {
     const src = ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=6"];
@@ -7706,25 +7970,816 @@ async function cmdHook() {
   return 0;
 }
 
+// src/commands/graph.ts
+import path13 from "node:path";
+
+// src/plot.ts
+import { mkdirSync as mkdirSync9, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import path12 from "node:path";
+import { deflateSync } from "node:zlib";
+var BG = [24, 24, 24];
+var PANEL = [34, 34, 34];
+var GRID = [58, 58, 58];
+var ZERO = [95, 95, 95];
+var MARK = [120, 110, 60];
+var Raster = class {
+  w;
+  h;
+  data;
+  constructor(w, h) {
+    this.w = w;
+    this.h = h;
+    this.data = new Uint8Array(w * h * 3);
+  }
+  set(x, y, c) {
+    x = Math.round(x);
+    y = Math.round(y);
+    if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+    const i2 = (y * this.w + x) * 3;
+    this.data[i2] = c[0];
+    this.data[i2 + 1] = c[1];
+    this.data[i2 + 2] = c[2];
+  }
+  rect(x0, y0, x1, y1, c) {
+    for (let y = Math.round(y0); y < Math.round(y1); y++) for (let x = Math.round(x0); x < Math.round(x1); x++) this.set(x, y, c);
+  }
+  /** Line of thickness `t` (a square brush along a DDA walk). */
+  line(x0, y0, x1, y1, c, t = 1, dash = 0) {
+    const n = Math.max(1, Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))));
+    const r = Math.floor(t / 2);
+    for (let i2 = 0; i2 <= n; i2++) {
+      if (dash && Math.floor(i2 / dash) % 2 === 1) continue;
+      const x = x0 + (x1 - x0) * i2 / n;
+      const y = y0 + (y1 - y0) * i2 / n;
+      for (let dy = -r; dy <= t - 1 - r; dy++) for (let dx = -r; dx <= t - 1 - r; dx++) this.set(x + dx, y + dy, c);
+    }
+  }
+};
+var CRC = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(buf) {
+  let c = 4294967295;
+  for (let i2 = 0; i2 < buf.length; i2++) c = CRC[(c ^ buf[i2]) & 255] ^ c >>> 8;
+  return (c ^ 4294967295) >>> 0;
+}
+function chunk(type, data2) {
+  const b = Buffer.alloc(12 + data2.length);
+  b.writeUInt32BE(data2.length, 0);
+  b.write(type, 4, "ascii");
+  Buffer.from(data2).copy(b, 8);
+  b.writeUInt32BE(crc32(b.subarray(4, 8 + data2.length)), 8 + data2.length);
+  return b;
+}
+function encodePng(w, h, rgb) {
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) Buffer.from(rgb.buffer, rgb.byteOffset + y * w * 3, w * 3).copy(raw, y * (w * 3 + 1) + 1);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", new Uint8Array(0))]);
+}
+function fmt(v) {
+  if (!isFinite(v)) return "?";
+  const a = Math.abs(v);
+  if (a >= 1e3) return String(Math.round(v));
+  if (a >= 10) return String(Math.round(v * 10) / 10);
+  if (a >= 0.1 || a === 0) return String(Math.round(v * 100) / 100);
+  return v.toPrecision(2);
+}
+var hex = (c) => "0x" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
+function renderChart(file, ch) {
+  const { width: W, height: H } = ch;
+  const r = new Raster(W, H);
+  r.rect(0, 0, W, H, BG);
+  const labels = [];
+  const L = 78;
+  const R = W - 16;
+  const top = 34;
+  const bottom = H - 28;
+  const gap = 26;
+  const ph = (bottom - top - gap * (ch.panels.length - 1)) / ch.panels.length;
+  const span = ch.xTo - ch.xFrom || 1;
+  const X = (f) => L + (f - ch.xFrom) / span * (R - L);
+  labels.push({ x: 8, y: 8, text: ch.title, color: "white", size: 16 });
+  ch.panels.forEach((pn, pi) => {
+    const y0 = top + pi * (ph + gap);
+    const y1 = y0 + ph;
+    r.rect(L, y0, R, y1, PANEL);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const s2 of pn.series) for (const [, v] of s2.points) if (isFinite(v)) lo = Math.min(lo, v), hi = Math.max(hi, v);
+    if (!isFinite(lo)) lo = 0, hi = 1;
+    if (hi - lo < 1e-9) lo -= 1, hi += 1;
+    const pad = (hi - lo) * 0.06;
+    lo = lo >= 0 ? Math.max(0, lo - pad) : lo - pad;
+    hi += pad;
+    const Y = (v) => y1 - (v - lo) / (hi - lo) * (y1 - y0);
+    for (let g = 0; g <= 4; g++) {
+      const v = lo + (hi - lo) * g / 4;
+      r.line(L, Y(v), R, Y(v), GRID);
+      labels.push({ x: 6, y: Y(v) - 7, text: fmt(v), color: "0xaaaaaa", size: 12 });
+    }
+    if (lo < 0 && hi > 0) r.line(L, Y(0), R, Y(0), ZERO);
+    for (const m of ch.marks) if (m >= ch.xFrom && m <= ch.xTo) r.line(X(m), y0, X(m), y1, MARK, 1, 4);
+    for (const s2 of pn.series) {
+      for (let i2 = 1; i2 < s2.points.length; i2++) {
+        const [fa, va] = s2.points[i2 - 1];
+        const [fb, vb] = s2.points[i2];
+        if (isFinite(va) && isFinite(vb)) r.line(X(fa), Y(va), X(fb), Y(vb), s2.color, 2);
+      }
+    }
+    let lx = L + 8;
+    labels.push({ x: lx, y: y0 + 6, text: pn.title + (pn.unit ? " (" + pn.unit + ")" : ""), color: "white", size: 13 });
+    lx += (pn.title.length + (pn.unit ? pn.unit.length + 3 : 0)) * 8 + 16;
+    for (const s2 of pn.series) {
+      if (pn.series.length < 2) break;
+      labels.push({ x: lx, y: y0 + 6, text: s2.name, color: hex(s2.color), size: 13 });
+      lx += s2.name.length * 8 + 14;
+    }
+  });
+  for (const m of ch.marks) if (m >= ch.xFrom && m <= ch.xTo) labels.push({ x: X(m) - 12, y: bottom + 8, text: "f" + fmt(m), color: "0xd8c870", size: 12 });
+  labels.push({ x: L, y: H - 14, text: "f" + fmt(ch.xFrom), color: "0xaaaaaa", size: 11 });
+  labels.push({ x: R - 40, y: H - 14, text: "f" + fmt(ch.xTo), color: "0xaaaaaa", size: 11 });
+  mkdirSync9(path12.dirname(file), { recursive: true });
+  const png = encodePng(W, H, r.data);
+  const font2 = labelFont();
+  if (!font2 || !has("ffmpeg")) {
+    writeFileSync5(file, png);
+    return false;
+  }
+  const plain = file.replace(/\.png$/i, "") + ".plain.png";
+  writeFileSync5(plain, png);
+  const safe = (s2) => s2.replace(/[^A-Za-z0-9 ._#=+/()-]/g, "_");
+  const vf = labels.map((l) => `drawtext=fontfile='${font2}':text='${safe(l.text)}':x=${Math.round(l.x)}:y=${Math.round(l.y)}:fontsize=${l.size}:fontcolor=${l.color}`).join(",");
+  const res = run("ffmpeg", ["-v", "error", "-y", "-i", plain, "-vf", vf, "-frames:v", "1", "-update", "1", file]);
+  if (res.status !== 0) {
+    renameSync2(plain, file);
+    return false;
+  }
+  rmSync4(plain, { force: true });
+  return true;
+}
+
+// src/commands/graph.ts
+var safeName = (s2) => s2.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "x";
+function parseGraph(log) {
+  const g = { title: "", fps: 25, spatial: false, color: false, from: 0, to: 0, step: 1, keys: [], samples: [] };
+  for (const line of log.split("\n")) {
+    if (line.startsWith("PROP ")) {
+      const m = /^PROP (.*) fps=([\d.]+) spatial=(\d) color=(\d)$/.exec(line);
+      if (m) {
+        g.title = m[1];
+        g.fps = Number(m[2]);
+        g.spatial = m[3] === "1";
+        g.color = m[4] === "1";
+      }
+    } else if (line.startsWith("RANGE ")) {
+      [g.from, g.to, g.step] = line.slice(6).split(" ").map(Number);
+    } else if (line.startsWith("KEY ")) {
+      g.keys.push({ frame: parseFloat(line.slice(4)), text: line.slice(4) });
+    } else if (line.startsWith("S ")) {
+      const [f, v] = line.slice(2).split(" ");
+      g.samples.push({ frame: Number(f), v: v.split(",").map(Number) });
+    }
+  }
+  return g;
+}
+var DIM_COLORS = [
+  [236, 92, 92],
+  [98, 206, 104],
+  [96, 150, 245],
+  [230, 200, 80]
+];
+function speeds(g) {
+  const res = [];
+  for (let i2 = 1; i2 < g.samples.length; i2++) {
+    const a = g.samples[i2 - 1];
+    const b = g.samples[i2];
+    const dt = (b.frame - a.frame) / g.fps;
+    const d = b.v.map((x, k) => (x - a.v[k]) / dt);
+    res.push({ frame: (a.frame + b.frame) / 2, v: g.spatial ? [Math.hypot(...d)] : d.map(Math.abs) });
+  }
+  return res;
+}
+function segments(g) {
+  const res = [];
+  const sp = speeds(g);
+  for (let k = 1; k < g.keys.length; k++) {
+    const f0 = g.keys[k - 1].frame;
+    const f12 = g.keys[k].frame;
+    const inSeg = sp.filter((s2) => s2.frame > f0 && s2.frame < f12);
+    const s0 = g.samples.find((s2) => Math.abs(s2.frame - f0) < 1e-6);
+    const s1 = g.samples.find((s2) => Math.abs(s2.frame - f12) < 1e-6);
+    if (!inSeg.length || !s0 || !s1) continue;
+    const mag = inSeg.map((s2) => Math.hypot(...s2.v));
+    const change = s1.v.map((x, i2) => x - s0.v[i2]);
+    const avg = mag.reduce((a, m) => a + m, 0) / mag.length;
+    let pi = 0;
+    for (let i2 = 1; i2 < mag.length; i2++) if (mag[i2] > mag[pi]) pi = i2;
+    const peak = mag[pi];
+    const at2 = Math.round((inSeg[pi].frame - f0) / (f12 - f0) * 100);
+    const ch = change.length === 1 ? fmt(change[0]) : "[" + change.map(fmt).join(",") + "]";
+    if (peak < 1e-9) res.push(`f${fmt(f0)}->f${fmt(f12)}  no change (hold or equal values)`);
+    else if (peak / (avg || 1) < 1.05) res.push(`f${fmt(f0)}->f${fmt(f12)}  change ${ch}  constant speed ${fmt(avg)}/s (linear)`);
+    else res.push(`f${fmt(f0)}->f${fmt(f12)}  change ${ch}  avg ${fmt(avg)}/s  peak ${fmt(peak)}/s at f${fmt(inSeg[pi].frame)} (${at2}% in)  peak/avg ${(peak / (avg || 1)).toFixed(2)}`);
+  }
+  return res;
+}
+async function cmdGraph(argv) {
+  const usage = 'usage: ae graph "Comp" "Layer" "Transform/Position" [--from f] [--to f] [--step f] [--out file.png] [--width px] [--height px]';
+  const p = parseArgs(argv, "graph", ["--from", "--to", "--step", "--out", "--width", "--height"]);
+  const [comp, layer, prop] = p.pos;
+  if (!comp || !layer || !prop || p.pos.length > 3) die(usage);
+  const opt2 = (name) => {
+    if (p.opts[name] === void 0) return "null";
+    const v = Number(str(p, name));
+    if (str(p, name) === "" || !isFinite(v)) die(`${name} must be a number, got '${str(p, name)}'`);
+    return String(v);
+  };
+  const code = `var __c = AE.comp(${jsstr(comp)});
+var __p = AE.prop(AE.layer(__c, ${/^\d+$/.test(layer) ? Number(layer) : jsstr(layer)}), ${jsstr(prop)});
+log(AE.graphData(__p, ${opt2("--from")}, ${opt2("--to")}, ${opt2("--step")}));
+`;
+  const r = await runSnippet("graph", "graph", code, { undo: false, label: "ae graph", quiet: true });
+  if (r.code) return r.code;
+  const g = parseGraph(readLog(r.log));
+  if (g.samples.length < 2) die("graph: not enough samples");
+  const dims = g.samples[0].v.length;
+  const names = g.color ? ["r", "g", "b", "a"] : dims === 1 ? ["value"] : ["x", "y", "z"];
+  const valueSeries = [];
+  for (let d = 0; d < dims; d++) valueSeries.push({ name: names[d] ?? "d" + d, color: DIM_COLORS[d % 4], points: g.samples.map((s2) => [s2.frame, s2.v[d]]) });
+  const sp = speeds(g);
+  const speedSeries = [];
+  for (let d = 0; d < sp[0].v.length; d++) {
+    speedSeries.push({ name: g.spatial ? "speed" : names[d] ?? "d" + d, color: g.spatial ? [240, 240, 240] : DIM_COLORS[d % 4], points: sp.map((s2) => [s2.frame, s2.v[d]]) });
+  }
+  const file = abspath(str(p, "--out") || path13.join(WORK, "graph", `${safeName(comp)}_${safeName(layer)}_${safeName(prop)}.png`));
+  const labelled = renderChart(file, {
+    title: g.title.replace(/'/g, ""),
+    width: int(p, "--width", 1e3),
+    height: int(p, "--height", 560),
+    xFrom: g.from,
+    xTo: g.to,
+    marks: g.keys.map((k) => k.frame),
+    panels: [
+      { title: "value", series: valueSeries },
+      { title: g.spatial ? "speed" : "speed per dimension", unit: "/s", series: speedSeries }
+    ]
+  });
+  out(`${g.title}  f${fmt(g.from)}..f${fmt(g.to)}, a sample every ${fmt(g.step)}f`);
+  if (g.keys.length) out("keys  " + g.keys.map((k) => "f" + k.text).join(" | "));
+  else out("no keys");
+  for (const s2 of segments(g)) out(s2);
+  if (!labelled) err("ae: graph written without labels (needs ffmpeg and a system font)");
+  out("GRAPH " + file);
+  return 0;
+}
+
+// src/commands/project.ts
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync6, writeFileSync as writeFileSync6 } from "node:fs";
+import path14 from "node:path";
+var compExpr = (name) => `AE.comp(${name ? jsstr(name) : "null"})`;
+async function cmdSel(argv) {
+  const p = parseArgs(argv, "sel", [], [], () => die("usage: ae sel"));
+  if (p.pos.length) die("usage: ae sel");
+  return (await runSnippet("sel", "sel", "log(AE.sel());\n", { undo: false, label: "ae sel" })).code;
+}
+async function cmdMarkers(argv) {
+  const p = parseArgs(argv, "markers", [], ["--all"]);
+  if (p.pos.length > 1) die('usage: ae markers ["Comp"] [--all]');
+  const comps = p.opts["--all"] ? "AE.comps()" : `[${compExpr(p.pos[0])}]`;
+  return (await runSnippet("markers", "markers", `log(AE.markerReport(${comps}));
+`, { undo: false, label: "ae markers" })).code;
+}
+async function cmdMark(argv) {
+  const usage = 'usage: ae mark "Comp" frame "comment" [--layer name] [--dur frames] [--label 0-16]';
+  const p = parseArgs(argv, "mark", ["--layer", "--dur", "--label"]);
+  const [comp, frame, comment] = p.pos;
+  if (!comp || frame === void 0 || p.pos.length > 3) die(usage);
+  if (!/^\d+(\.\d+)?$/.test(frame)) die(`frame must be a number, got '${frame}'`);
+  const layer = str(p, "--layer");
+  const opts = `{duration: ${int(p, "--dur", 0)}${p.opts["--label"] ? ", label: " + int(p, "--label", 0) : ""}}`;
+  const code = `var __c = ${compExpr(comp)};
+var __t = ${layer ? `AE.layer(__c, ${jsstr(layer)})` : "__c"};
+AE.marker(__t, ${Number(frame)}, ${jsstr(comment ?? "")}, ${opts});
+log("marker at f" + ${Number(frame)} + " on " + (__t === __c ? "comp '" + __c.name + "'" : "#" + __t.index + " '" + __t.name + "'"));
+`;
+  return (await runSnippet("markers", "mark", code, { undo: true, label: "ae mark", rollback: true })).code;
+}
+async function cmdHealth(argv) {
+  const p = parseArgs(argv, "health", ["--safe"], ["--all"]);
+  if (p.pos.length > 1) die('usage: ae health ["Comp"] [--all] [--safe %]');
+  const safe = int(p, "--safe", 0);
+  if (safe < 0 || safe >= 50) die("--safe is a margin in % of each side (0-49)");
+  let comps;
+  if (p.opts["--all"]) comps = "AE.comps()";
+  else if (p.pos[0]) comps = `[${compExpr(p.pos[0])}]`;
+  else comps = '(app.project.activeItem instanceof CompItem ? [app.project.activeItem] : (log("(no active comp: project checks only; name a comp or use --all)"), []))';
+  return (await runSnippet("health", "health", `log(AE.health(${comps}, {safe: ${safe}}));
+`, { undo: false, label: "ae health" })).code;
+}
+var SCOPES = ["name", "text", "expr", "file", "effect", "marker"];
+async function cmdFind(argv) {
+  const usage = `usage: ae find "text" [--in ${SCOPES.join(",")}] [--comp "Comp"] [--regex]`;
+  const p = parseArgs(argv, "find", ["--in", "--comp"], ["--regex"]);
+  if (p.pos.length !== 1 || !p.pos[0]) die(usage);
+  const scopes = str(p, "--in", SCOPES.join(","));
+  for (const s2 of scopes.split(",")) if (!SCOPES.includes(s2)) die(`--in: unknown scope '${s2}' (${SCOPES.join(",")})`);
+  if (p.opts["--regex"]) {
+    try {
+      new RegExp(p.pos[0]);
+    } catch (e) {
+      die(`bad regex: ${e.message}`);
+    }
+  }
+  const comp = str(p, "--comp");
+  const code = `log(AE.find(${jsstr(p.pos[0])}, {regex: ${!!p.opts["--regex"]}, scopes: ${jsstr(scopes)}, comp: ${comp ? jsstr(comp) : "null"}}));
+`;
+  return (await runSnippet("find", "find", code, { undo: false, label: "ae find" })).code;
+}
+var EFFECTS_CACHE = path14.join(WORK, "effects.tsv");
+async function loadEffects(refresh) {
+  if (!refresh && isFile(EFFECTS_CACHE)) return parseEffects(readFileSync6(EFFECTS_CACHE, "utf8"));
+  if (!aeRunning() && isFile(EFFECTS_CACHE)) {
+    err("ae: AE is not running; using the cached effect list");
+    return parseEffects(readFileSync6(EFFECTS_CACHE, "utf8"));
+  }
+  const code = 'var __e = app.effects; log("V\\t" + app.version); for (var __i = 0; __i < __e.length; __i++) { log("E\\t" + __e[__i].matchName + "\\t" + __e[__i].displayName + "\\t" + __e[__i].category); }\n';
+  const r = await runSnippet("effects", "effects", code, { undo: false, label: "ae effects", quiet: true });
+  if (r.code) return r.code;
+  const text = readLog(r.log);
+  mkdirSync10(WORK, { recursive: true });
+  writeFileSync6(EFFECTS_CACHE, text);
+  return parseEffects(text);
+}
+function parseEffects(text) {
+  const res = [];
+  for (const line of text.split("\n")) {
+    const f = line.split("	");
+    if (f[0] === "E" && f.length >= 4 && f[1]) res.push({ matchName: f[1], displayName: f[2], category: f[3] });
+  }
+  return res;
+}
+function searchEffects(all, words) {
+  const w = words.map((x) => x.toLowerCase());
+  return all.filter((e) => w.every((x) => `${e.displayName}	${e.matchName}	${e.category}`.toLowerCase().includes(x))).sort((a, b) => a.category.localeCompare(b.category) || a.displayName.localeCompare(b.displayName));
+}
+async function cmdEffects(argv) {
+  const p = parseArgs(argv, "effects", [], ["--refresh"]);
+  const all = await loadEffects(!!p.opts["--refresh"]);
+  if (typeof all === "number") return all;
+  const hits = searchEffects(all, p.pos);
+  if (!hits.length) {
+    err(`ae: no effect matches '${p.pos.join(" ")}' (${all.length} effects; ae effects --refresh after installing plugins)`);
+    return 1;
+  }
+  const w = Math.min(40, Math.max(...hits.map((e) => e.displayName.length)));
+  for (const e of hits) out(`${e.displayName.padEnd(w)}  ${e.matchName}  [${e.category || "-"}]`);
+  return 0;
+}
+
+// src/mcp.ts
+import { spawn } from "node:child_process";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync7, statSync as statSync5, writeFileSync as writeFileSync7 } from "node:fs";
+import path15 from "node:path";
+import { createInterface } from "node:readline";
+var VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+var MAX_IMAGE = 4 * 1024 * 1024;
+var MAX_IMAGES = 6;
+var S = (description) => ({ type: "string", description });
+var N2 = (description) => ({ type: "number", description });
+var B = (description) => ({ type: "boolean", description });
+var RES2 = { type: "string", enum: ["full", "half", "third", "quarter"], description: "render resolution (default half)" };
+var s = (v) => v === void 0 || v === null ? "" : String(v);
+var opt = (flag2, v) => v === void 0 || v === null || v === "" ? [] : [flag2, String(v)];
+var flag = (f, v) => v ? [f] : [];
+var prefixed = (prefix) => (lines) => lines.filter((l) => l.startsWith(prefix)).map((l) => l.slice(prefix.length));
+var pngLines = (lines) => lines.filter((l) => l.endsWith(".png") && path15.isAbsolute(l));
+function scriptFile(code, name, dflt) {
+  const dir = path15.join(WORK, "mcp");
+  mkdirSync11(dir, { recursive: true });
+  const f = path15.join(dir, (s(name).replace(/[^A-Za-z0-9_-]+/g, "_") || dflt) + ".jsx");
+  writeFileSync7(f, code);
+  return f;
+}
+function docs() {
+  const md = readFileSync7(path15.join(TOOLS, "skills", "after-effects", "SKILL.md"), "utf8").replace(/^---\n[\s\S]*?\n---\n/, "");
+  return "In this MCP server every `ae <command>` of the reference below is a tool (ae_run runs a script, ae_snap renders frames, ...). Paths in results are on the user's Mac.\n\n" + md;
+}
+var TOOLS_LIST = [
+  {
+    name: "ae_docs",
+    title: "After Effects reference",
+    description: "The full reference: the AE.* ExtendScript API, the ES3 rules the lint enforces, and the After Effects pitfalls. Read it once before writing a script.",
+    props: {},
+    readOnly: true,
+    argv: () => ({ text: docs() })
+  },
+  {
+    name: "ae_selection",
+    title: "Selection and playhead",
+    description: "What the user has selected in After Effects: the active comp, its playhead frame and work area, the selected layers, properties and keyframes, and the Project panel selection.",
+    props: {},
+    readOnly: true,
+    argv: () => ["sel"]
+  },
+  {
+    name: "ae_tree",
+    title: "Project overview",
+    description: "Every comp (folder, size, fps, duration, layers), then the layers of the active comp or of `main`.",
+    props: { main: S("comp whose layers to list (default: the active comp)") },
+    readOnly: true,
+    argv: (a) => ["tree", ...opt("--main", a.main)]
+  },
+  {
+    name: "ae_dump",
+    title: "Comp details",
+    description: "One comp in detail: layers with timing, transforms, text, effects with their values, every keyframe with its easing, expressions and their errors, markers.",
+    props: {
+      comp: S("comp name"),
+      layer: S("only this layer"),
+      depth: N2("recurse this many levels into precomps"),
+      at: N2("comp frame for the values (default: the playhead)"),
+      props: B("also every changed static value (shape contents, masks, text animators, layer styles)"),
+      keys: B("include keyframes (default true)"),
+      max_keys: N2("keyframes shown per property (default 30)"),
+      raw_text: B("read expression-driven Source Text raw (one undo step)")
+    },
+    required: ["comp"],
+    readOnly: true,
+    argv: (a) => [
+      "dump",
+      s(a.comp),
+      ...opt("--layer", a.layer),
+      ...opt("--depth", a.depth),
+      ...opt("--at", a.at),
+      ...flag("--props", a.props),
+      ...flag("--no-keys", a.keys === false),
+      ...opt("--max-keys", a.max_keys),
+      ...flag("--raw-text", a.raw_text)
+    ]
+  },
+  {
+    name: "ae_snap",
+    title: "Render frames",
+    description: "Render comp frames to PNG and return them as images (as one labelled contact sheet by default). Frames are comp frames: '8,44,90' or '0-120:30'.",
+    props: {
+      comp: S("comp name"),
+      frames: S("frame list: 8,44,90 or 0-120:30"),
+      res: RES2,
+      crop: S("x,y,w,h in comp pixels: a close-up of one region"),
+      sheet: B("one contact sheet instead of separate images (default true)"),
+      cols: N2("sheet columns (default 4)"),
+      width: N2("sheet cell width in px (default 640)")
+    },
+    required: ["comp", "frames"],
+    readOnly: true,
+    argv: (a) => ["snap", s(a.comp), s(a.frames), ...opt("--res", a.res), ...opt("--crop", a.crop), ...flag("--sheet", a.sheet !== false), ...opt("--cols", a.cols), ...opt("--width", a.width)],
+    images: (l) => {
+      const sheet = prefixed("SHEET ")(l);
+      return sheet.length ? sheet : pngLines(l);
+    }
+  },
+  {
+    name: "ae_run",
+    title: "Run a script",
+    description: "Lint and run ExtendScript in After Effects as one undo step (the AE.* library is preloaded; ES3 only, see ae_docs). log(...) output comes back. A run that throws is rolled back. Afterwards expression errors in the comps it touched are reported. diff: also report what changed in the project.",
+    props: {
+      code: S("the script (ExtendScript, ES3)"),
+      file: S("or: path of a .jsx file to run"),
+      name: S("script name, used for the undo step and the file (default mcp_script)"),
+      readonly: B("no undo group (for scripts that only read)"),
+      diff: B("print what the script changed in the project (slow on big projects)"),
+      ab_comp: S("render before/after frames of this comp as one sheet (needs ab_frames)"),
+      ab_frames: S("frames for ab_comp: 0,60,120")
+    },
+    destructive: true,
+    argv: (a) => {
+      const file = a.code !== void 0 ? scriptFile(s(a.code), a.name, "mcp_script") : s(a.file);
+      return ["run", file, ...flag("--ro", a.readonly), ...flag("--diff", a.diff), ...opt("--ab", a.ab_comp), ...opt("--frames", a.ab_frames)];
+    },
+    images: prefixed("SHEET ")
+  },
+  {
+    name: "ae_eval",
+    title: "Evaluate",
+    description: 'Run a one-liner in After Effects: the value of the last expression is returned (AE.comp("Main").numLayers).',
+    props: { code: S("ExtendScript expression or statements"), readonly: B("no undo group") },
+    required: ["code"],
+    destructive: true,
+    argv: (a) => ["eval", s(a.code), ...flag("--ro", a.readonly)]
+  },
+  {
+    name: "ae_check",
+    title: "Lint a script",
+    description: "Syntax and ExtendScript (ES3) lint without running anything.",
+    props: { code: S("the script"), file: S("or: path of a .jsx file") },
+    readOnly: true,
+    argv: (a) => ["check", a.code !== void 0 ? scriptFile(s(a.code), "check", "check") : s(a.file)]
+  },
+  {
+    name: "ae_markers",
+    title: "Read markers",
+    description: "Comp and layer markers with their comments, by frame. Users leave notes to the agent as markers.",
+    props: { comp: S("comp name (default: the active comp)"), all: B("every comp in the project") },
+    readOnly: true,
+    argv: (a) => ["markers", ...a.comp ? [s(a.comp)] : [], ...flag("--all", a.all)]
+  },
+  {
+    name: "ae_mark",
+    title: "Add a marker",
+    description: "Add a comp marker (or a layer marker) with a comment, e.g. to point the user at a change. Undoable.",
+    props: { comp: S("comp name"), frame: N2("comp frame"), comment: S("marker text"), layer: S("put it on this layer"), duration: N2("length in frames"), label: N2("label colour 0-16") },
+    required: ["comp", "frame", "comment"],
+    argv: (a) => ["mark", s(a.comp), s(a.frame), s(a.comment), ...opt("--layer", a.layer), ...opt("--dur", a.duration), ...opt("--label", a.label)]
+  },
+  {
+    name: "ae_health",
+    title: "Project health",
+    description: "Missing footage and fonts, expression errors, layers never visible or off screen, text crossing the frame edge (or a safe margin).",
+    props: { comp: S("comp to check (default: the active comp)"), all: B("check every comp"), safe: N2("safe margin in % of each side for text") },
+    readOnly: true,
+    argv: (a) => ["health", ...a.comp ? [s(a.comp)] : [], ...flag("--all", a.all), ...opt("--safe", a.safe)]
+  },
+  {
+    name: "ae_find",
+    title: "Search the project",
+    description: "Find text in item and layer names, text layers, expressions, footage paths, effects and marker comments.",
+    props: { query: S("text to find (case-insensitive)"), scopes: S("comma list of name,text,expr,file,effect,marker (default all)"), comp: S("only this comp"), regex: B("query is a regular expression") },
+    required: ["query"],
+    readOnly: true,
+    argv: (a) => ["find", s(a.query), ...opt("--in", a.scopes), ...opt("--comp", a.comp), ...flag("--regex", a.regex)]
+  },
+  {
+    name: "ae_effects",
+    title: "Search effects",
+    description: "Installed effects matching all words (display name, matchName, category). AE.addEffect(layer, matchName) takes either name.",
+    props: { query: S("words to match, e.g. 'blur'"), refresh: B("re-read the list from AE (after installing plugins)") },
+    readOnly: true,
+    argv: (a) => ["effects", ...s(a.query).split(/\s+/).filter(Boolean), ...flag("--refresh", a.refresh)]
+  },
+  {
+    name: "ae_graph",
+    title: "Motion graph",
+    description: "Value and speed curves of an animated property as an image, plus per-segment numbers (peak speed and where it falls between keys, peak/avg as a measure of the easing).",
+    props: {
+      comp: S("comp name"),
+      layer: S("layer name or index"),
+      prop: S("property path: 'Transform/Position', 'Effects/Gaussian Blur/Blurriness', or an alias: pos, scale, rot, opacity"),
+      from: N2("first frame (default: first key - 5)"),
+      to: N2("last frame (default: last key + 5)"),
+      step: N2("sample every N frames (default 0.5)")
+    },
+    required: ["comp", "layer", "prop"],
+    readOnly: true,
+    argv: (a) => ["graph", s(a.comp), s(a.layer), s(a.prop), ...opt("--from", a.from), ...opt("--to", a.to), ...opt("--step", a.step)],
+    images: prefixed("GRAPH ")
+  },
+  {
+    name: "ae_measure",
+    title: "Measure an image",
+    description: "Ink bounding box, centre and mean colour of a PNG (e.g. a snap); with a second image, how far and in which direction it is off.",
+    props: { image: S("PNG path"), other: S("second PNG to compare with (scaled to the first)"), box: S("x,y,w,h: only this region"), bg: S("background colour #RRGGBB (default: alpha or the corner colour)") },
+    required: ["image"],
+    readOnly: true,
+    argv: (a) => ["measure", s(a.image), ...a.other ? [s(a.other)] : [], ...opt("--box", a.box), ...opt("--bg", a.bg)]
+  },
+  {
+    name: "ae_beats",
+    title: "Detect beats",
+    description: "Music accents (onsets) of an audio layer in the comp's frames, strongest = 1; optionally as markers on that layer.",
+    props: {
+      comp: S("comp name"),
+      layer: S("the audio layer"),
+      from: N2("first comp frame"),
+      to: N2("last comp frame"),
+      top: N2("keep only the N strongest"),
+      min_gap: N2("frames between accents at least (default 3)"),
+      mark: B("add a marker 'beat <strength>' at each accent on the layer (undoable)")
+    },
+    required: ["comp", "layer"],
+    argv: (a) => ["beats", s(a.comp), "--layer", s(a.layer), ...opt("--from", a.from), ...opt("--to", a.to), ...opt("--top", a.top), ...opt("--min-gap", a.min_gap), ...flag("--mark", a.mark)]
+  },
+  {
+    name: "ae_export",
+    title: "Export a video",
+    description: "Render a comp and encode it for a destination (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif). Default range: the work area. AE is busy until the render is done.",
+    props: {
+      comp: S("comp name"),
+      preset: S("preset (default youtube-1080)"),
+      out: S("output file (default ./<comp>_<preset>.<ext>)"),
+      from: N2("first comp frame"),
+      to: N2("last comp frame"),
+      full: B("the whole comp instead of the work area"),
+      fit: { type: "string", enum: ["pad", "crop"], description: "when the aspect differs: letterbox (default) or fill" },
+      force: B("overwrite an existing file"),
+      quick: B("take the frames with snap instead of the render queue: a fast preview, no audio"),
+      res: { type: "string", enum: ["full", "half", "third", "quarter"], description: "with quick: render resolution (default full)" }
+    },
+    required: ["comp"],
+    argv: (a) => [
+      "export",
+      s(a.comp),
+      ...opt("--preset", a.preset),
+      ...opt("--out", a.out),
+      ...opt("--from", a.from),
+      ...opt("--to", a.to),
+      ...flag("--full", a.full),
+      ...opt("--fit", a.fit),
+      ...flag("--force", a.force),
+      ...flag("--quick", a.quick),
+      ...a.quick ? opt("--res", a.res) : []
+    ]
+  },
+  {
+    name: "ae_probe",
+    title: "Probe a video",
+    description: "Size, fps (flags variable frame rate), duration, frame count and audio of a video file.",
+    props: { file: S("video file"), fps: N2("also the length in comp frames at this rate") },
+    required: ["file"],
+    readOnly: true,
+    argv: (a) => ["probe", s(a.file), ...opt("--fps", a.fps)]
+  },
+  {
+    name: "ae_frames",
+    title: "Sample a video",
+    description: "A contact sheet of evenly spaced frames from a video file (to pick clip times), returned as an image.",
+    props: { file: S("video file"), n: N2("number of frames (default 12)"), from: N2("start, seconds"), to: N2("end, seconds") },
+    required: ["file"],
+    readOnly: true,
+    argv: (a) => ["frames", s(a.file), ...opt("--n", a.n), ...opt("--from", a.from), ...opt("--to", a.to)],
+    images: prefixed("SHEET ")
+  },
+  {
+    name: "ae_save",
+    title: "Save the project",
+    description: "Save the open project with AE's own Save (not undoable). ONLY when the user explicitly asks. status: only report the path and unsaved changes.",
+    props: { status: B("only report"), backup: B("first copy the .aep to Backups/") },
+    destructive: true,
+    argv: (a) => ["save", ...flag("--status", a.status), ...flag("--backup", a.backup)]
+  },
+  {
+    name: "ae_doctor",
+    title: "Check the setup",
+    description: "Check node, ffmpeg, the AE scripting preference and the macOS Automation permission, and test the connection; prints the fix for each problem.",
+    props: {},
+    readOnly: true,
+    argv: () => ["doctor"]
+  }
+];
+var EXIT = { 1: "the script logged ERR", 2: "usage or lint error, nothing ran", 3: "AE is not running or did not answer (a modal dialog open in AE?)" };
+function runCli(argv) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path15.join(TOOLS, "dist", "ae.mjs"), ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => stdout += d);
+    child.stderr.on("data", (d) => stderr += d);
+    child.on("error", (e) => resolve({ code: 2, stdout, stderr: stderr + e.message }));
+    child.on("close", (code) => resolve({ code: code ?? 2, stdout, stderr }));
+  });
+}
+async function callTool(name, args) {
+  const tool = TOOLS_LIST.find((t) => t.name === name);
+  if (!tool) return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true };
+  for (const r2 of tool.required ?? []) if (args[r2] === void 0 || args[r2] === "") return { content: [{ type: "text", text: `missing argument '${r2}'` }], isError: true };
+  if (name === "ae_run" || name === "ae_check") {
+    if (args.code === void 0 === !args.file) return { content: [{ type: "text", text: "give either code or file" }], isError: true };
+  }
+  const argv = tool.argv(args);
+  if (!Array.isArray(argv)) return { content: [{ type: "text", text: argv.text }], isError: false };
+  const r = await runCli(argv);
+  const parts = [r.stdout.trimEnd(), r.stderr.trimEnd()].filter(Boolean);
+  if (r.code) parts.push(`exit ${r.code}: ${EXIT[r.code] ?? "failed"}`);
+  const content = [{ type: "text", text: parts.join("\n") || "ok" }];
+  if (tool.images && r.code === 0) {
+    const files = tool.images(r.stdout.split("\n").map((l) => l.trim()));
+    for (const f of files.slice(0, MAX_IMAGES)) {
+      try {
+        if (statSync5(f).size > MAX_IMAGE) continue;
+        content.push({ type: "image", data: readFileSync7(f).toString("base64"), mimeType: "image/png" });
+      } catch {
+      }
+    }
+  }
+  return { content, isError: r.code !== 0 };
+}
+var INSTRUCTIONS = "Drives the Adobe After Effects running on the user's Mac. Read ae_docs once before writing a script (ExtendScript is ES3, and the AE.* library avoids the known AE traps). Look before you change: ae_selection, ae_tree, ae_dump, ae_snap. Edits go through ae_run, one undo step each. Frames are comp frames. Never save unless the user asks.";
+function toolDefs() {
+  return TOOLS_LIST.map((t) => ({
+    name: t.name,
+    title: t.title,
+    description: t.description,
+    inputSchema: { type: "object", properties: t.props, ...t.required ? { required: t.required } : {} },
+    annotations: { title: t.title, readOnlyHint: !!t.readOnly, destructiveHint: !!t.destructive, openWorldHint: false }
+  }));
+}
+async function handle(msg, version2) {
+  const reply = (result) => ({ jsonrpc: "2.0", id: msg.id, result });
+  const fail = (code, message) => ({ jsonrpc: "2.0", id: msg.id ?? null, error: { code, message } });
+  if (typeof msg !== "object" || msg === null || typeof msg.method !== "string") return msg && "id" in msg ? fail(-32600, "invalid request") : null;
+  const isNote = msg.id === void 0;
+  switch (msg.method) {
+    case "initialize": {
+      const asked = String(msg.params?.protocolVersion ?? "");
+      return reply({
+        protocolVersion: VERSIONS.includes(asked) ? asked : VERSIONS[0],
+        capabilities: { tools: {} },
+        serverInfo: { name: "aectl", title: "After Effects (aectl)", version: version2 },
+        instructions: INSTRUCTIONS
+      });
+    }
+    case "ping":
+      return reply({});
+    case "tools/list":
+      return reply({ tools: toolDefs() });
+    case "tools/call": {
+      const name = String(msg.params?.name ?? "");
+      const args = msg.params?.arguments ?? {};
+      return reply(await callTool(name, args));
+    }
+    default:
+      return isNote ? null : fail(-32601, `method not found: ${msg.method}`);
+  }
+}
+async function cmdMcp(argv) {
+  if (argv.length) {
+    err("usage: ae mcp   (an MCP server on stdin/stdout; configure it in your MCP client, see README)");
+    return 2;
+  }
+  const dirs = (process.env.PATH ?? "").split(path15.delimiter);
+  for (const d of ["/usr/local/bin", "/opt/homebrew/bin"]) if (!dirs.includes(d)) dirs.unshift(d);
+  process.env.PATH = dirs.join(path15.delimiter);
+  let version2 = "0";
+  try {
+    version2 = JSON.parse(readFileSync7(path15.join(TOOLS, "package.json"), "utf8")).version;
+  } catch {
+  }
+  const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
+  let queue = Promise.resolve();
+  const rl = createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    if (!line.trim()) return;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+      return;
+    }
+    queue = queue.then(async () => {
+      try {
+        const res = await handle(msg, version2);
+        if (res) send(res);
+      } catch (e) {
+        send({ jsonrpc: "2.0", id: msg.id ?? null, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } });
+      }
+    });
+  });
+  await new Promise((resolve) => rl.on("close", resolve));
+  await queue;
+  return 0;
+}
+
 // src/cli.ts
 var USAGE3 = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
   ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]   (a failed run is undone unless --no-rollback)
+  ae run script.jsx --diff        also print what the script changed in the project
+  ae run script.jsx --ab "Comp" --frames 0,60,120 [--res r] [--crop x,y,w,h]   before/after contact sheet
   ae eval 'js' [--ro] [--no-rollback]    ae check script.jsx [more.jsx ...]
+  ae sel                          the active comp, its playhead, the selected layers/properties/keys
   ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
+  ae markers ["Comp"] [--all]     comp and layer markers with their comments
+  ae mark "Comp" frame "comment" [--layer name] [--dur N] [--label N]
+  ae health ["Comp"] [--all] [--safe %]   missing footage/fonts, expression errors, off-screen layers, text past the edge
+  ae find "text" [--in name,text,expr,file,effect,marker] [--comp "Comp"] [--regex]
+  ae effects [words...] [--refresh]   installed effects: display name, matchName, category
   ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]
+  ae graph "Comp" "Layer" "Transform/Position" [--from F] [--to F] [--step F] [--out file.png]   value + speed curves
   ae sheet out.png a.png b.png ... [--cols N] [--width px]
   ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB] [--threshold 24]   ink bounding box, centre, mean colour; b-a delta
   ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]
   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
-  ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]
+  ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env] [--mark [--label N]]
   ae beats music.wav [--fps 25] [--offset F] [...]   accents (onsets) in comp frames; --env: loudness per frame
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+  ae export "Comp" --quick [--res half] [...]   frames via snap instead of the render queue: fast previews, no audio
   ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
   ae doctor                       check node/ffmpeg/AE/permissions/prefs      ae selftest [--keep]
   ae completion zsh               zsh completion; add to ~/.zshrc:  eval "$(ae completion zsh)"
   ae hook                         Claude Code PostToolUse hook: lints a .jsx right after it is written
+  ae mcp                          MCP server on stdin/stdout (Claude Desktop and other MCP clients)
 Exit codes: 0 ok, 1 script logged ERR, 2 usage/syntax/lint error, 3 AE not running / timeout.
 `;
 var COMMANDS = {
@@ -7733,6 +8788,13 @@ var COMMANDS = {
   check: cmdCheck,
   dump: cmdDump,
   tree: cmdTree,
+  sel: cmdSel,
+  markers: cmdMarkers,
+  mark: cmdMark,
+  health: cmdHealth,
+  find: cmdFind,
+  effects: cmdEffects,
+  graph: cmdGraph,
   snap: cmdSnap,
   sheet: cmdSheet,
   measure: cmdMeasure,
@@ -7745,6 +8807,7 @@ var COMMANDS = {
   selftest: cmdSelftest,
   completion: cmdCompletion,
   hook: cmdHook,
+  mcp: cmdMcp,
   _names: cmdNames
 };
 async function main(argv) {
@@ -7778,6 +8841,10 @@ async function main(argv) {
     throw e;
   }
 }
+process.stdout.on("error", (e) => {
+  if (e.code === "EPIPE") process.exit(0);
+  throw e;
+});
 main(process.argv.slice(2)).then(
   (code) => {
     process.exitCode = code;

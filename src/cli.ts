@@ -6,26 +6,40 @@ import { cmdFrames, cmdMeasure, cmdProbe, cmdSheet } from "./commands/media.ts";
 import { cmdSave } from "./commands/save.ts";
 import { cmdCheck, cmdEval, cmdRun } from "./commands/script.ts";
 import { cmdCompletion, cmdDoctor, cmdHook, cmdNames, cmdSelftest } from "./commands/setup.ts";
+import { cmdGraph } from "./commands/graph.ts";
+import { cmdEffects, cmdFind, cmdHealth, cmdMark, cmdMarkers, cmdSel } from "./commands/project.ts";
+import { cmdMcp } from "./mcp.ts";
 import { err, Exit } from "./util.ts";
 
 export const USAGE = `ae - drive Adobe After Effects from the shell (macOS). See README.md next to this file.
   ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]   (a failed run is undone unless --no-rollback)
+  ae run script.jsx --diff        also print what the script changed in the project
+  ae run script.jsx --ab "Comp" --frames 0,60,120 [--res r] [--crop x,y,w,h]   before/after contact sheet
   ae eval 'js' [--ro] [--no-rollback]    ae check script.jsx [more.jsx ...]
+  ae sel                          the active comp, its playhead, the selected layers/properties/keys
   ae dump "Comp" [--depth N] [--layer name] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
   ae tree [--main "Comp"]         (default: the active comp)
+  ae markers ["Comp"] [--all]     comp and layer markers with their comments
+  ae mark "Comp" frame "comment" [--layer name] [--dur N] [--label N]
+  ae health ["Comp"] [--all] [--safe %]   missing footage/fonts, expression errors, off-screen layers, text past the edge
+  ae find "text" [--in name,text,expr,file,effect,marker] [--comp "Comp"] [--regex]
+  ae effects [words...] [--refresh]   installed effects: display name, matchName, category
   ae snap "Comp" 8,44,90|10-100:10 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]
+  ae graph "Comp" "Layer" "Transform/Position" [--from F] [--to F] [--step F] [--out file.png]   value + speed curves
   ae sheet out.png a.png b.png ... [--cols N] [--width px]
   ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB] [--threshold 24]   ink bounding box, centre, mean colour; b-a delta
   ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]
   ae probe video.mp4 [--fps N]    (--fps: also the length in comp frames at N fps)
-  ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]
+  ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env] [--mark [--label N]]
   ae beats music.wav [--fps 25] [--offset F] [...]   accents (onsets) in comp frames; --env: loudness per frame
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+  ae export "Comp" --quick [--res half] [...]   frames via snap instead of the render queue: fast previews, no audio
   ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
   ae doctor                       check node/ffmpeg/AE/permissions/prefs      ae selftest [--keep]
   ae completion zsh               zsh completion; add to ~/.zshrc:  eval "$(ae completion zsh)"
   ae hook                         Claude Code PostToolUse hook: lints a .jsx right after it is written
+  ae mcp                          MCP server on stdin/stdout (Claude Desktop and other MCP clients)
 Exit codes: 0 ok, 1 script logged ERR, 2 usage/syntax/lint error, 3 AE not running / timeout.
 `;
 
@@ -35,6 +49,13 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   check: cmdCheck,
   dump: cmdDump,
   tree: cmdTree,
+  sel: cmdSel,
+  markers: cmdMarkers,
+  mark: cmdMark,
+  health: cmdHealth,
+  find: cmdFind,
+  effects: cmdEffects,
+  graph: cmdGraph,
   snap: cmdSnap,
   sheet: cmdSheet,
   measure: cmdMeasure,
@@ -47,6 +68,7 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   selftest: cmdSelftest,
   completion: cmdCompletion,
   hook: cmdHook,
+  mcp: cmdMcp,
   _names: cmdNames,
 };
 
@@ -81,6 +103,12 @@ export async function main(argv: string[]): Promise<number> {
     throw e;
   }
 }
+
+// `ae ... | head` closes the pipe early: stop quietly instead of throwing EPIPE
+process.stdout.on("error", (e: NodeJS.ErrnoException) => {
+  if (e.code === "EPIPE") process.exit(0);
+  throw e;
+});
 
 main(process.argv.slice(2)).then(
   (code) => {

@@ -1,7 +1,7 @@
 // End-to-end tests of the built CLI (dist/ae.mjs through the `ae` launcher) for everything that does not need AE.
 // `npm test` builds first.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,12 +10,17 @@ import { looksLikeExtendScript } from "../src/commands/setup.ts";
 import { jsstr } from "../src/util.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-// a name no AE can have, so nothing here ever talks to a running After Effects
+const tmp = () => mkdtempSync(path.join(os.tmpdir(), "aectl-"));
+// an osascript that answers "not running" (also on machines without one) and an app name no AE can have:
+// nothing here ever talks to a running After Effects
+const BIN = tmp();
+writeFileSync(path.join(BIN, "osascript"), "#!/bin/sh\necho false\n");
+chmodSync(path.join(BIN, "osascript"), 0o755);
+const ENV = { ...process.env, AE_APP: "No Such After Effects 2099", PATH: BIN + path.delimiter + process.env.PATH };
 const ae = (args: string[], input?: string) => {
-  const r = spawnSync(path.join(ROOT, "ae"), args, { encoding: "utf8", input, env: { ...process.env, AE_APP: "No Such After Effects 2099" } });
+  const r = spawnSync(path.join(ROOT, "ae"), args, { encoding: "utf8", input, env: ENV });
   return { code: r.status, out: r.stdout, err: r.stderr };
 };
-const tmp = () => mkdtempSync(path.join(os.tmpdir(), "aectl-"));
 
 describe("cli", () => {
   it("prints usage: exit 0 for help, 2 without a command", () => {
@@ -46,10 +51,47 @@ describe("cli", () => {
     [["snap", "X", "1-a"], "bad frame list '1-a'"],
     [["save", "--zzz"], "usage: ae save"],
     [["completion", "bash"], "usage: ae completion zsh"],
+    [["run", "x.jsx", "--ab", "Main"], "no such file: x.jsx"],
+    [["sel", "extra"], "usage: ae sel"],
+    [["markers", "A", "B"], "usage: ae markers"],
+    [["mark", "Main"], "usage: ae mark"],
+    [["mark", "Main", "ten", "hi"], "frame must be a number"],
+    [["health", "--safe", "60"], "--safe is a margin"],
+    [["find"], "usage: ae find"],
+    [["find", "x", "--in", "names"], "unknown scope 'names'"],
+    [["find", "(", "--regex"], "bad regex"],
+    [["graph", "Main", "Title"], "usage: ae graph"],
+    [["graph", "Main", "Title", "pos", "--from", "x"], "--from must be a number"],
+    [["beats", "x.wav", "--mark"], "--mark puts markers on the audio layer"],
+    [["mcp", "extra"], "usage: ae mcp"],
   ])("ae %j -> exit 2 with a message", (args, msg) => {
     const r = ae(args);
     expect(r.code).toBe(2);
     expect(r.err).toContain(msg);
+  });
+
+  it("run: --ab needs --frames", () => {
+    const d = tmp();
+    writeFileSync(path.join(d, "s.jsx"), "log(1);\n");
+    const r = ae(["run", path.join(d, "s.jsx"), "--ab", "Main"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("--ab and --frames go together");
+  });
+
+  it("every command in the usage is documented and completed", () => {
+    const usage = ae(["help"]).out;
+    const cmds = new Set([...usage.matchAll(/(?:^|\s{2,})ae ([a-z]+)/gm)].map((m) => m[1]));
+    expect(cmds.size).toBeGreaterThan(20);
+    const skill = readFileSync(path.join(ROOT, "skills/after-effects/SKILL.md"), "utf8");
+    const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+    const zsh = readFileSync(path.join(ROOT, "completions/_ae"), "utf8");
+    for (const c of cmds) {
+      if (c === "hook") continue; // internal: registered by the plugin
+      // the completion is for people at a shell, not for agents: SKILL.md stays lean
+      if (c !== "completion") expect(skill, `ae ${c} in SKILL.md`).toMatch(new RegExp("\\bae " + c + "\\b"));
+      expect(readme, `ae ${c} in README.md`).toMatch(new RegExp("\\bae " + c + "\\b"));
+      expect(zsh, `${c} in completions/_ae`).toContain(`'${c}:`);
+    }
   });
 
   it("check: ok for a valid script, exit 2 with the error for a broken one", () => {

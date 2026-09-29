@@ -1,6 +1,6 @@
 ---
 name: after-effects
-description: Drive a running Adobe After Effects (macOS) from the shell with the `ae` CLI and the ExtendScript helper library - inspect comps and layers (dump/tree), run and lint .jsx edits as one undo step, render frames to PNG contact sheets to check the result, probe and sample video files, save the project. Use whenever the user asks to look at, edit, animate, retime, re-text, replace footage in, or render frames from an After Effects project, or to write/debug ExtendScript for AE.
+description: Drive a running Adobe After Effects (macOS) from the shell with the `ae` CLI and the ExtendScript helper library - see what the user selected and where the playhead is, read their markers, inspect comps and layers (dump/tree/find/health), run and lint .jsx edits as one undo step with a diff of what changed, render frames to PNG contact sheets, graph motion curves, time animation to music, export video, save the project. Use whenever the user asks to look at, edit, animate, retime, re-text, replace footage in, or render frames from an After Effects project, or to write/debug ExtendScript for AE.
 ---
 
 # After Effects from the shell (`ae` + `lib.jsx`)
@@ -14,8 +14,9 @@ description: Drive a running Adobe After Effects (macOS) from the shell with the
   "Allow Scripts to Write Files and Access Network" pref and the macOS Automation permission, and prints the fix.
 - Requirements: AE running, node 22+, ffmpeg/ffprobe (for sheets and video tools).
 
-The user works in this AE project. Read with `dump`/`tree`/`snap` before changing anything, keep edits in `AE.run`
-(one undo step each), and never save unless asked.
+The user works in this AE project. Read with `sel`/`dump`/`tree`/`snap` before changing anything, keep edits in `AE.run`
+(one undo step each), and never save unless asked. "This layer", "here", "from this frame" mean the selection and the
+playhead: `ae sel`. Notes the user leaves as markers: `ae markers`.
 
 ## Writing a script
 
@@ -53,34 +54,52 @@ AE.run("Retime intro", function (log) {          // one Cmd+Z step, dialogs supp
 
 ```
 ae run script.jsx [--log file] [--ro|--undo] [--no-rollback] [--timeout s]   # check, run, wait for log (+PNGs), print, exit 1 on ERR
+ae run edit.jsx --diff                                       # + what changed in the project (dumps every comp: slow on big ones)
+ae run edit.jsx --ab "Main" --frames 0,60,120 [--crop x,y,w,h]   # + a before/after contact sheet of those frames
 ae check script.jsx [more.jsx ...]                           # syntax + ExtendScript lint only (no AE needed)
 ae eval 'AE.comp("Logo").numLayers' [--ro]                   # the value of the last expression is logged
 ae eval 'var c=AE.comp("Logo"); c.duration' --ro             # (or of a top-level `return x`); no IIFE needed
+ae sel                                                       # active comp, playhead frame, work area, selected layers/props/keys
 ae dump "Main" [--depth 1] [--layer "Title"] [--at F] [--props] [--no-keys] [--max-keys N] [--raw-text]
 ae tree [--main "Main"]                                      # all comps (folder, size, fps, dur) + layers of --main (default: active comp)
+ae markers ["Main"] [--all]                                  # comp + layer markers with comments, by frame (default: active comp)
+ae mark "Main" 120 "check the ease" [--layer "Title"] [--dur 10] [--label 0-16]   # add a marker (undoable)
+ae health ["Main"] [--all] [--safe 10]                       # missing footage/fonts, expression errors, off-screen layers, text past the edge
+ae find "logo" [--in name,text,expr,file,effect,marker] [--comp "Main"] [--regex]
+ae effects blur [--refresh]                                  # installed effects: display name, matchName, category (cached)
 ae snap "Main" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols 4] [--width 640]
 ae snap "Intro" 0-84:14 --sheet                     # ranges: a-b or a-b:step
+ae graph "Main" "Title" "Transform/Position" [--from F] [--to F] [--step 0.5] [--out g.png]   # value + speed curves
 ae sheet out.png a.png b.png ... [--cols 4] [--width 640]    # contact sheet from any images (labels = file names)
 ae measure a.png [b.png] [--box x,y,w,h] [--bg #RRGGBB]       # ink bounding box, centre, mean colour; with b: the b-a delta
 ae frames video.mp4 [--n 12] [--cols 4] [--width 480] [--from s] [--to s] [--out sheet.png]  # pick clip times
 ae probe video.mp4 [--fps 25]                                # size, fps (avg + r; flags VFR), duration, frames, audio;
                                                              # --fps: length in comp frames at that rate
-ae beats "Main" --layer "Music" [--from F --to F] [--top N] [--env]   # music accents in Main's frames (see below)
+ae beats "Main" --layer "Music" [--from F --to F] [--top N] [--env] [--mark]   # music accents in Main's frames (see below)
 ae beats music.wav [--fps 25] [--offset F] [...]                      # the same for a file that starts at frame F
 ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+ae export "Main" --preset gif --quick [--res half]           # frames via snap, not the render queue: previews, no audio
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
-ae selftest [--keep]                                         # 53 checks + a rollback round trip in a throwaway comp, then cleanup (dirties the project)
+ae selftest [--keep]                                         # 76 checks + a rollback round trip in a throwaway comp, then cleanup (dirties the project)
+ae mcp                                                       # the same tools as an MCP server (for clients without a shell)
 ```
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
   path per line, then `SHEET <path>` with `--sheet`. The comp's own resolution factor is restored afterwards.
+  `--prefix` only names the files. Sheets put transparent frames on a grey checkerboard (white text stays visible).
   `--crop x,y,w,h` is in comp pixels at any `--res` (a close-up of one region).
 - `measure`: "ink" is every pixel that is not background (alpha, or the corner colour). Compare a snap with a design
   render (`ae measure design.png snap.png`): b is scaled to a's size, so a half-res snap works; the delta says how
   far and in which direction the AE result is off.
-- `dump`/`tree`/`snap` are read-only (no undo group). `dump --raw-text` runs in one undo group "ae dump", see pitfall 6.
+- `dump`/`tree`/`snap`/`sel`/`markers`/`health`/`find`/`graph` are read-only (no undo group). `dump --raw-text` runs in
+  one undo group "ae dump", see pitfall 6.
+- After every `run`/`eval` that is not `--ro`, expression errors in the comps the script looked up (`AE.comp`/`AE.layer`)
+  and in the active comp are logged as `WARN expression error ...` (at most 1.5 s of checking; `ae health` checks a comp fully).
+- `graph` prints per key segment the change, average and peak speed, where the peak falls (50% = symmetric ease) and
+  peak/avg (1.00 = linear; higher = stronger ease), then `GRAPH <png>`. `run --ab` prints `SHEET <png>`, pairs of
+  before/after cells. `health` lines are `WARN` (problem) or `info`.
 - Env: `AE_TIMEOUT` (log wait, default 300 s), `AE_SNAP_TIMEOUT` (PNG wait, default 60 s), `AE_TMP` (work dir,
   default `$TMPDIR`), `AE_DEBUG=1` (PNG wait timing), `AE_APP` (app name; default: the running AE, else the newest one in /Applications).
 - Exit codes: 0 ok, 1 ERR logged, 2 usage/syntax/lint, 3 AE not running / timeout (a modal dialog in AE is the usual cause).
@@ -93,12 +112,16 @@ ae selftest [--keep]                                         # 53 checks + a rol
   strongest in the range), a bar. With `--layer` the file, start, stretch and in/out come from AE, so the frames are
   the comp's own: key animation straight to them. `--top N` keeps the N strongest (downbeats, big hits),
   `--min-gap F` (default 3) merges closer ones, `--threshold` (default 0.15) drops weaker ones, `--env` adds loudness
-  in dBFS per frame (swells, quiet parts). Time remapping on the layer is ignored (a note says so).
+  in dBFS per frame (swells, quiet parts). Time remapping on the layer is ignored (a note says so). `--mark` adds a
+  marker `beat <strength>` on the audio layer at each accent (one undo step; `--label` colours them). A `tempo ~120
+  BPM, a beat every 12.5 frames` note goes to stderr when there is a clear pulse (it may be half or double the felt one).
 - The combined file that actually ran is at `$TMPDIR/ae-tools/run/<name>.combined.jsx`.
 - `export`: AE renders a master (ProRes 422 HQ or Lossless; with alpha for alpha presets) through the render queue,
   then ffmpeg encodes the preset. Default range: the comp's work area. Default file: `./<comp>_<preset>.<ext>`; an
   existing file needs `--force`. AE is busy until its render finishes. Prints `EXPORT <path>` and a probe line
-  (size, fps, length, codec, alpha, audio): check it matches what the user asked for. Map requests to presets:
+  (size, fps, length, codec, alpha, audio): check it matches what the user asked for. `--quick` takes the frames with
+  `saveFrameToPng` instead (the render queue is not touched, `--res half|quarter` for fast previews of heavy comps; no
+  audio, at most 3000 frames). Map requests to presets:
 
   | the user says | preset |
   |---|---|
@@ -123,12 +146,16 @@ Frames are always comp frames (`frame * comp.frameDuration`). Layer/comp argumen
 name or numeric id.
 
 **Lookup**
-- `AE.comp(nameOrId)`: throws if the comp is missing or the name is ambiguous. `AE.comps(name?)` returns all comps with that name.
+- `AE.comp(nameOrId)`: throws if the comp is missing or the name is ambiguous; no argument means `AE.active()`, the
+  active comp (throws when none). `AE.comps(name?)` returns all comps with that name.
 - `AE.layer(comp, nameOrIndex)`: throws if missing or ambiguous. `AE.layers(comp, name|RegExp|fn)` returns the list.
 - `AE.copyLayer(layer, comp?, {name, above})` copies a layer and returns **the copy** (found by its new id; pitfall 11).
   In place it lands right above the source, in another comp at the top, or above `above` (layer or index).
 - `AE.findProp(group, matchNameOrName)` searches recursively. `AE.findProps(...)` returns all matches.
 - `AE.tf(layer, "pos"|"anchor"|"scale"|"rot"|"opacity"|"x"|"y"|matchName)` returns a transform property.
+- `AE.prop(layer, "Transform/Position")`: a property by a path of names or matchNames (numbers are indexes), an `AE.tf`
+  alias, or one name searched recursively; throws if missing. `AE.propPath(prop)` goes back, `AE.layerOf(prop)` gives
+  the layer, `AE.isLayer(x)` tells a layer of any kind (pitfall 17).
 - `AE.footage(path, folder?, {reload})` finds a FootageItem by `file.fsName`, or imports it (into `AE.folder(folder)`).
   `reload: true` re-reads a file that changed on disk.
   Afterwards `AE.lastImported` is true/false and `AE.imported` holds the items imported during this script.
@@ -139,6 +166,14 @@ name or numeric id.
 - `AE.trim(layer, inF, outF)`: `null` keeps a side. It retries up to 3 times with a frameDuration/4 tolerance. If the trim
   won't stick (e.g. past the end of the source) it logs a `WARN` with the source span and returns false.
 - `AE.shift(layer, dF)` moves `startTime`. `AE.span(layer)` returns `"in=.. out=.. st=.."` in frames.
+
+**Selection, playhead, markers**
+- `AE.selected()` returns `{comp, frame, layers, props, keys: [{prop, keys}], items}`; `AE.sel()` is the text `ae sel` prints.
+- `AE.cti(comp, frame?)` reads (or moves) the playhead in frames. `AE.select(layers)` selects exactly those layers.
+  `AE.show(comp, frame?)` opens the comp in the viewer at that frame, to show the user a result.
+- `AE.markers(compOrLayer)` returns `[{index, frame, comment, duration, chapter, url, label}]` (frames).
+  `AE.marker(compOrLayer, frame, comment, {duration, label, chapter, url})` adds one; `AE.removeMarkers(target, text|RegExp?)`.
+  `AE.markerReport(comps)` is what `ae markers` prints.
 
 **Colour**
 - `AE.hex("#7143EC")` returns `[r,g,b]`. `AE.hex("#7143EC", true)` returns `[r,g,b,1]`. Also accepts `"#abc"`, `"#RRGGBBAA"` and arrays.
@@ -175,10 +210,19 @@ name or numeric id.
   `AE.textStyle(layer, {...same})` restyles (every key, expression-safe). Warns when the font is not installed.
 - `AE.addRect(compOrShapeLayer, {size, pos, round, fill, stroke, strokeWidth, name, layer})` returns the shape layer.
   A new layer sits at [0,0], so `pos` is in comp coordinates (pitfall 12). Find the group with `AE.findProp(L, name)`.
-- `AE.addEffect(layer, matchName, name?)`, `AE.fx(layer, name, param?)` (fresh references, pitfall 14),
+- `AE.addEffect(layer, matchNameOrDisplayName, name?)`: the display name works in any case, but only the matchName also
+  works in a localised AE (`ae effects <word>` finds it); a wrong name throws with suggestions, `AE.effectName(name)`
+  returns the matchName; `AE.fx(layer, name, param?)` (fresh references, pitfall 14),
+  `AE.setProps(effectOrGroup, {nameOrMatchNameOrIndex: value})` sets several properties (hex for colours, true/false
+  for checkboxes) and lists the valid names on a typo,
   `AE.control(layer, "slider"|"checkbox"|"color"|"point"|"angle"|"layer", name, value)` returns the value property.
 - `AE.fade(layer, fromF, toF, a=0, b=100, opts)`; `AE.clearKeys(prop)` (Time Remap is reset to its two default
   keys instead of being hidden, pitfall 13).
+
+**Expressions**
+- `AE.expr(prop, code)` sets an expression and checks it: on an error it restores the previous one and throws with AE's
+  message (`line 1: Error: layer named 'x' is missing ...`). Prefer it to `prop.expression = ...` (pitfall 16).
+  `AE.exprError(prop)` returns the error ("" if fine); `AE.exprErrors(comp)` lists them for a comp.
 
 **Footage placement**
 - `AE.replaceFootage(layer, pathOrItem, {folder, anchor, scale, pos, start, inF, outF, mute, name, cover, reload})`:
@@ -211,7 +255,10 @@ name or numeric id.
     text, `(OFF)` when AE disabled it, and `expr ERROR:` with AE's message;
   - `props`: also every changed static value (shape contents, masks, text animators, layer styles), one `prop` line each;
   - `depth` recurses into precomps.
-- `AE.tree(mainName?)` is the project overview used by `ae tree`.
+- `AE.tree(mainName?)` is the project overview used by `ae tree`. `AE.health(comps, {safe})` and `AE.find(query,
+  {regex, scopes, comp})` are `ae health` and `ae find`. `AE.graphData(prop, fromF?, toF?, step?)` is the data behind `ae graph`.
+- `AE.bounds(layer, frame?)` returns `[left, top, right, bottom]` in comp pixels (real text/shape extents, through
+  parents; matches what `ae measure` finds in a snap); null for 3D layers, cameras, lights and nulls.
 - `AE.snap(comp, frames[], outDir?, prefix?, res?)` queues PNGs, logs `PNG <path>` and returns the paths.
   `res` is `"full"|"half"|"third"|"quarter"`, 1–4, `[x,y]`, or null (keep).
 - `AE.render(comp, path, {kind, full, from, to, ame})` renders through the render queue and returns the file:
@@ -256,6 +303,13 @@ name or numeric id.
     (`root.property("Lid")`) after the last `addProperty`.
 15. **`renderQueue.render()` and `queueInAME()` process the whole queue**, including items the user queued for later.
     `AE.render` switches those off for the duration, restores them, and removes its own item.
+16. **A broken expression fails silently** (verified in 26.5): setting one never throws, even with a syntax error, and
+    `expressionEnabled` stays true; only `expressionError` says what is wrong, while AE shows a banner. Set expressions
+    with `AE.expr` (checks, restores, throws); `ae run` warns about errors it finds afterwards, and the lint warns about
+    a syntax error in a literal expression string.
+17. **`instanceof` matches only the exact class** (verified in 26.5): a text layer is a `TextLayer` but not an `AVLayer`,
+    a null is an `AVLayer`, and no layer is a `Layer`. Test the kind you mean (`instanceof TextLayer`), or
+    `AE.isLayer(x)` for any layer, or `typeof L.sourceRectAtTime === "function"` for one that draws.
 
 ExtendScript is ES3. `ae run`, `ae eval` and `ae check` parse every script first and refuse to send one AE would reject
 (a syntax error in AE opens a blocking modal dialog). With the Claude Code plugin, every `.jsx` you write or edit is

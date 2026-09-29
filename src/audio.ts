@@ -57,16 +57,19 @@ export interface Onset {
   strength: number; // 0..1, relative to the strongest onset found
 }
 
-/**
- * Onsets (note attacks, hits) by spectral flux: the summed rise of the log spectrum from one 11.6 ms step to the
- * next, minus its local average; peaks at least `minGap` seconds apart and above `threshold` x the strongest.
- */
-export function onsets(input: Float32Array, o: { minGap?: number; threshold?: number } = {}): Onset[] {
-  // silence in front, so an attack right at the start has something to rise from
+/** The samples with N samples of silence in front, so an attack right at the start has something to rise from. */
+function padded(input: Float32Array): Float32Array {
   const x = new Float32Array(input.length + N);
   x.set(input, N);
+  return x;
+}
+
+/**
+ * Novelty per 11.6 ms step: the spectral flux (summed rise of the log spectrum from one step to the next) minus its
+ * local average over about half a second. Peaks are onsets; its periodicity is the tempo.
+ */
+export function novelty(x: Float32Array): Float64Array {
   const frames = Math.max(0, Math.floor((x.length - N) / HOP) + 1);
-  if (frames < 3) return [];
   const win = new Float64Array(N);
   for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / N);
   const re = new Float64Array(N), im = new Float64Array(N);
@@ -86,7 +89,6 @@ export function onsets(input: Float32Array, o: { minGap?: number; threshold?: nu
     flux[f] = s;
     [prev, cur] = [cur, prev];
   }
-  // novelty = flux above its local average (about half a second around it)
   const w = Math.round((0.25 * SR) / HOP);
   const nov = new Float64Array(frames);
   let acc = 0, lo = 0, hi = -1;
@@ -95,6 +97,18 @@ export function onsets(input: Float32Array, o: { minGap?: number; threshold?: nu
     while (lo < f - w) acc -= flux[lo++];
     nov[f] = Math.max(0, flux[f] - acc / (hi - lo + 1));
   }
+  return nov;
+}
+
+/**
+ * Onsets (note attacks, hits): peaks of the novelty at least `minGap` seconds apart and above `threshold` x the
+ * strongest, each moved to where its attack starts.
+ */
+export function onsets(input: Float32Array, o: { minGap?: number; threshold?: number } = {}): Onset[] {
+  const x = padded(input);
+  const nov = novelty(x);
+  const frames = nov.length;
+  if (frames < 3) return [];
   let max = 0;
   for (const v of nov) max = Math.max(max, v);
   if (max <= 0) return [];
@@ -143,4 +157,51 @@ export function loudness(x: Float32Array, step: number): number[] {
     out.push(10 * Math.log10(s / Math.max(1, end - i) + 1e-12));
   }
   return out;
+}
+
+/**
+ * Tempo in BPM (60..200) from the autocorrelation of the novelty, refined between steps; NaN for less than about
+ * 2.5 s of audio or no clear pulse. Octave errors (half or double the felt tempo) are possible, as with any
+ * autocorrelation; 80..160 BPM is preferred slightly.
+ */
+export function tempo(input: Float32Array): number {
+  // onsets are one-step spikes, and a beat period is rarely a whole number of steps: widen them first (~50 ms)
+  const raw = novelty(padded(input));
+  const nov = new Float64Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    let s = 0;
+    for (let k = -4; k <= 4; k++) s += (raw[i + k] ?? 0) * (5 - Math.abs(k));
+    nov[i] = s / 25;
+  }
+  const step = HOP / SR;
+  const minLag = Math.floor(60 / 200 / step);
+  const maxLag = Math.ceil(60 / 60 / step);
+  if (nov.length < maxLag * 2.2) return NaN;
+  let mean = 0;
+  for (const v of nov) mean += v;
+  mean /= nov.length;
+  const ac = new Float64Array(maxLag + 2);
+  for (let lag = minLag - 1; lag <= maxLag + 1; lag++) {
+    let s = 0;
+    for (let i = 0; i + lag < nov.length; i++) s += (nov[i] - mean) * (nov[i + lag] - mean);
+    ac[lag] = s / (nov.length - lag);
+  }
+  let best = -Infinity;
+  let bestLag = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    const bpm = 60 / (lag * step);
+    const v = ac[lag] * (bpm >= 80 && bpm <= 160 ? 1 : 0.85);
+    if (v > best) {
+      best = v;
+      bestLag = lag;
+    }
+  }
+  if (!bestLag || best <= 0) return NaN;
+  // parabola through the neighbouring lags: one step (11.6 ms) is too coarse for a tempo on its own
+  const a = ac[bestLag - 1];
+  const b = ac[bestLag];
+  const c = ac[bestLag + 1];
+  const d = a - 2 * b + c;
+  const lag = bestLag + (d < 0 ? (0.5 * (a - c)) / d : 0);
+  return Math.round(600 / (lag * step)) / 10;
 }

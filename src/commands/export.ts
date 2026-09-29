@@ -1,10 +1,10 @@
 // ae export: render a comp in AE (or hand it to Media Encoder) and encode it for a destination preset.
 //   AE renders a master (ProRes 422 HQ / Lossless, with alpha for alpha presets) into the work dir, then ffmpeg
 //   encodes that master into the preset. With --ame, Media Encoder encodes with AE's H.264 template instead.
-import { readdirSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs, str } from "../args.ts";
-import { WORK } from "../env.ts";
+import { SNAP_TIMEOUT, WORK } from "../env.ts";
 import { hasAudio, probeVideo, rate } from "../media.ts";
 import { aspectMismatch, ffmpegArgs, findPreset, listPresets, presetNames, type Fit, type Preset } from "../presets.ts";
 import { readLog, runSnippet } from "../runner.ts";
@@ -12,11 +12,11 @@ import { abspath, die, err, exists, isFile, jsstr, need, out, run, sleep } from 
 
 const USAGE =
   'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] ' +
-  "[--keep-intermediate] [--timeout s] [--ame [--wait]]   (presets: ae export --list)";
+  "[--keep-intermediate] [--timeout s] [--quick [--res full|half|third|quarter]] [--ame [--wait]]   (presets: ae export --list)";
 const RENDER_TIMEOUT = 3600; // render() blocks AE until the file is written; the log only appears afterwards
 
 export async function cmdExport(argv: string[]): Promise<number> {
-  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list"]);
+  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout", "--res"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list", "--quick"]);
   if (p.opts["--list"]) {
     out(listPresets());
     return 0;
@@ -31,6 +31,10 @@ export async function cmdExport(argv: string[]): Promise<number> {
   const to = frameOpt(p.opts["--to"], "--to");
   if (p.opts["--full"] && (from !== undefined || to !== undefined)) die("--full and --from/--to exclude each other");
   if (p.opts["--wait"] && !p.opts["--ame"]) die("--wait only goes with --ame");
+  if (p.opts["--quick"] && p.opts["--ame"]) die("--quick and --ame exclude each other");
+  if (p.opts["--res"] && !p.opts["--quick"]) die("--res only goes with --quick (a render-queue export is always full size)");
+  const res = str(p, "--res", "full");
+  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : RENDER_TIMEOUT;
   if (!(timeout > 0)) die("--timeout must be a number of seconds");
 
@@ -45,8 +49,14 @@ export async function cmdExport(argv: string[]): Promise<number> {
   need("ffmpeg");
   need("ffprobe");
   const master = path.join(WORK, "export", `${safe}_${preset.name}_master.mov`);
-  err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
-  const rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  let rendered: string | number;
+  if (p.opts["--quick"]) {
+    err(`ae: snapping '${comp}' frame by frame (quick: no render queue, no audio)...`);
+    rendered = await snapMaster(comp, master, span, res, p.opts["--timeout"] ? timeout : undefined);
+  } else {
+    err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
+    rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  }
   if (typeof rendered === "number") return rendered;
 
   err(`ae: encoding ${preset.name}...`);
@@ -99,6 +109,48 @@ async function renderInAe(comp: string, file: string, o: RenderOpts, timeout: nu
     return 1;
   }
   return written;
+}
+
+/**
+ * The quick master: every frame of the span through saveFrameToPng (what `ae snap` uses: no render queue, AE is free
+ * again as soon as the PNGs are written), then one PNG-in-MOV file with alpha at the comp's frame rate. No audio.
+ */
+async function snapMaster(comp: string, file: string, span: { full: boolean; from?: number; to?: number }, res: string, timeout?: number): Promise<string | number> {
+  const dir = path.join(WORK, "export", "quick");
+  mkdirSync(dir, { recursive: true });
+  for (const f of readdirSync(dir)) if (/^q_f\d+\.png$/.test(f)) rmSync(path.join(dir, f), { force: true });
+  const range =
+    span.from !== undefined || span.to !== undefined
+      ? `a = ${span.from ?? 0}; b = ${span.to === undefined ? "Math.round(c.duration / fd) - 1" : span.to};`
+      : span.full
+        ? "a = 0; b = Math.round(c.duration / fd) - 1;"
+        : "a = Math.round(c.workAreaStart / fd); b = Math.round((c.workAreaStart + c.workAreaDuration) / fd) - 1;";
+  const code =
+    `var c = AE.comp(${jsstr(comp)}), fd = c.frameDuration, a, b, fr = [];\n${range}\n` +
+    `if (b < a) { throw new Error("export: empty frame range " + a + ".." + b); }\n` +
+    `if (b - a > 3000) { throw new Error("export --quick: " + (b - a + 1) + " frames is too many; use the render queue (no --quick)"); }\n` +
+    `for (var f = a; f <= b; f++) { fr.push(f); }\n` +
+    `log("FPS " + c.frameRate);\nAE.snap(c, fr, ${jsstr(dir)}, "q", ${jsstr(res)});\n`;
+  const r = await runSnippet("export", "quick", code, { undo: false, label: "ae export", quiet: true, snapTimeout: timeout ?? Math.max(SNAP_TIMEOUT, 600) });
+  if (r.code) return r.code;
+  const log = readLog(r.log).split("\n");
+  const pngs = log.filter((l) => l.startsWith("PNG ")).map((l) => l.slice(4));
+  const fps = Number(log.find((l) => l.startsWith("FPS "))?.slice(4));
+  if (!pngs.length || !(fps > 0)) {
+    err(`ae: no frames came back (log: ${r.log})`);
+    return 1;
+  }
+  const list = path.join(dir, "list.txt");
+  const q = (f: string) => "file '" + f.replace(/'/g, "'\\''") + "'";
+  writeFileSync(list, "ffconcat version 1.0\n" + pngs.map((f) => `${q(f)}\nduration ${(1 / fps).toFixed(6)}\n`).join(""));
+  const m = run("ffmpeg", ["-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", list, "-frames:v", String(pngs.length), "-r", String(fps), "-c:v", "png", "-pix_fmt", "rgba", file], { stdio: ["ignore", "inherit", "inherit"] });
+  for (const f of pngs) rmSync(f, { force: true });
+  if (m.status !== 0 || !isFile(file)) {
+    err(`ae: ffmpeg could not join the ${pngs.length} frames`);
+    return 1;
+  }
+  err(`ae: ${pngs.length} frames at ${+fps.toFixed(3)} fps`);
+  return file;
 }
 
 /** ffmpeg: master -> preset file. Returns 0, or 1 when ffmpeg fails. */

@@ -1,5 +1,6 @@
 // Toolkit self-test. Creates the throwaway comp __aetools_test (+ __aetools_test_src, folder
-// __aetools_test_folder, footage __aetools_clip.mp4), checks every mutating helper, snaps 3 frames.
+// __aetools_test_folder, footage __aetools_clip.mp4), checks every mutating helper (and markers, expressions, bounds,
+// health, effects, find), snaps 3 frames.
 // Run:  ae selftest   (generates the test clip with ffmpeg, runs this, then tests/cleanup.jsx)
 // Never touches existing comps/layers.
 var CLIP = AE.tmp + "/__aetools_clip.mp4";   // any video of 5 s or more; `ae selftest` generates one
@@ -173,6 +174,74 @@ AE.run("aetools test", function (log) {
     var nL = c.numLayers, src = AE.layer(c, "__txt"), cp = AE.copyLayer(src, null, { name: "__txt copy" });
     src = AE.layer(c, "__txt");
     check("copyLayer returns the copy, above the source", cp.name === "__txt copy" && c.numLayers === nL + 1 && cp.index === src.index - 1 && AE.getText(cp) === AE.getText(src), [cp.index, src.index]);
+
+    // ---- playhead, selection, markers
+    T = AE.layer(c, "__txt");   // fresh after copyLayer (pitfall 11)
+    AE.show(c, 50);
+    check("show/cti move the playhead", AE.cti(c) === 50 && near(c.time, 2) && AE.cti(c, 40) === 40, c.time);
+    AE.select([T]);
+    check("select() only these", T.selected && c.selectedLayers.length === 1, c.selectedLayers.length);
+    log("  sel:", AE.sel().split("\n")[0]);
+    AE.marker(c, 25, "__note", { duration: 5, label: 3 });
+    AE.marker(T, 30, "__layer note");
+    var cm = AE.markers(c), lm = AE.markers(T);
+    check("comp marker", cm.length === 1 && cm[0].frame === 25 && cm[0].comment === "__note" && cm[0].duration === 5 && cm[0].label === 3, cm);
+    check("layer marker", lm.length === 1 && lm[0].frame === 30 && lm[0].comment === "__layer note", lm);
+    check("markerReport", AE.markerReport([c]).indexOf("f25 comp '__note' dur=5f label=3") >= 0, AE.markerReport([c]));
+    check("removeMarkers", AE.removeMarkers(T, "layer") === 1 && AE.markers(T).length === 0);
+
+    // ---- property paths, layer kinds (pitfall 17)
+    check("prop() by path/alias/name", AE.prop(S, "ADBE Transform Group/ADBE Opacity").matchName === "ADBE Opacity" && AE.prop(S, "opacity").matchName === "ADBE Opacity" &&
+        AE.prop(S, "ADBE Vector Fill Color").matchName === "ADBE Vector Fill Color");
+    check("propPath/layerOf", AE.propPath(op) === op.propertyGroup(1).name + "/" + op.name && AE.layerOf(fc).name === "__shape", AE.propPath(op));
+    log("  instanceof AVLayer: text", T instanceof AVLayer, "shape", S instanceof AVLayer, "(pitfall 17)");
+    check("isLayer for every kind", AE.isLayer(T) && AE.isLayer(S) && AE.isLayer(V1) && !AE.isLayer(c) && !AE.isLayer(op) && AE.str(T).indexOf("<layer #") === 0, AE.str(T));
+
+    // ---- expressions (pitfall 16)
+    var rotP = AE.tf(S, "rot"), why = "";
+    AE.expr(rotP, "time * 10");
+    check("expr() sets a good expression", near(rotP.valueAtTime(1, false), 10) && AE.exprError(rotP) === "", rotP.valueAtTime(1, false));
+    threw = false;
+    try { AE.expr(rotP, "thisComp.layer(\"__nope__\").transform.rotation"); } catch (eE) { threw = true; why = eE.message; }
+    check("expr() throws on an error and restores", threw && rotP.expression === "time * 10" && rotP.expressionEnabled, why);
+    rotP.expression = "";
+    var anc = AE.tf(S, "anchor"), setThrew = false;
+    try { anc.expression = "thisComp.layer(\"__nope__\").transform.anchorPoint"; } catch (eS) { setThrew = true; }
+    var errs = AE.exprErrors(c);
+    check("a broken expression does not throw; exprErrors finds it", !setThrew && errs.length === 1 && errs[0].indexOf(": line 1: ") > 0, [setThrew, errs]);
+    anc.expression = "";
+    check("exprErrors clean again", AE.exprErrors(c).length === 0, AE.exprErrors(c));
+
+    // ---- bounds through a parent, health, effects by display name, find, diff snapshot, graph data
+    var BX = AE.addRect(c, { size: [100, 100], pos: [300, 200], layer: "__box" });
+    var bb = AE.bounds(BX, 0);
+    check("bounds of a 100x100 rect", bb !== null && near(bb[0], 250) && near(bb[1], 150) && near(bb[2], 350) && near(bb[3], 250), bb);
+    var PX = c.layers.addShape(); PX.name = "__parent";
+    BX = AE.layer(c, "__box");
+    BX.parent = PX;
+    var bp = AE.bounds(BX, 0);
+    check("bounds through a parent", bp !== null && near(bp[0], 250, 0.2) && near(bp[3], 250, 0.2), bp);
+    var pp0 = AE.tf(PX, "pos").value;
+    AE.set(AE.tf(PX, "pos"), [pp0[0] + 100, pp0[1]]);
+    bp = AE.bounds(BX, 0);
+    check("bounds follow the parent", bp !== null && near(bp[0], 350, 0.2) && near(bp[2], 450, 0.2), bp);
+    AE.set(AE.tf(PX, "pos"), [9000, 9000]);
+    var h = AE.health([c]);
+    check("health: off screen", h.indexOf("'__box': outside the frame") > 0, h);
+    var gdn = "";
+    for (var ei = 0; ei < app.effects.length; ei++) { if (app.effects[ei].matchName === "ADBE Gaussian Blur 2") { gdn = app.effects[ei].displayName; } }
+    AE.addEffect(BX, gdn.toUpperCase(), "Soft");
+    AE.setProps(AE.fx(BX, "Soft"), { "1": 12 });
+    check("addEffect by display name (any case), setProps by index", AE.fx(BX, "Soft").matchName === "ADBE Gaussian Blur 2" && near(AE.fx(BX, "Soft", 1).value, 12), gdn);
+    threw = false;
+    try { AE.addEffect(BX, "__no_such_effect__"); } catch (eF) { threw = true; why = eF.message; }
+    check("addEffect refuses an unknown name", threw && why.indexOf("no effect '__no_such_effect__'") === 0, why);
+    check("find() text", AE.find("Catch up", { comp: c }).indexOf("text   '__aetools_test' #") >= 0, AE.find("Catch up", { comp: c }));
+    var fb = AE.find("__box", { comp: c, scopes: "name" }).split("\n");
+    check("find() layer name in one scope", fb.length === 2 && fb[0].indexOf("layer  '__aetools_test' #") === 0 && fb[0].indexOf("'__box'") > 0, fb);
+    check("snapshot has the comp and its layers", AE._snapshot().indexOf("@C " + c.id + " COMP '__aetools_test'") >= 0 && AE._snapshot().indexOf("'__box' [shape]") > 0);
+    var gd = AE.graphData(op, null, null, 1).split("\n");
+    check("graphData", gd[0].indexOf("(ADBE Opacity)") > 0 && gd[1] === "RANGE 5 35 1" && gd.length === 2 + 3 + 31, [gd[0], gd[1], gd.length]);
 
     // ---- render: 5 frames through the render queue; the user's queue must be left as it was
     var rq = app.project.renderQueue, rqBefore = rq.numItems;

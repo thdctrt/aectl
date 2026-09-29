@@ -128,6 +128,27 @@ describe("runtime warnings", () => {
   });
 });
 
+describe("expression strings", () => {
+  it.each([
+    ["AE.expr with a syntax error", 'AE.expr(p, "wiggle(2, 30");'],
+    ["an assigned expression with a syntax error", 'p.expression = "linear(time, 0, 1,";'],
+  ])("warns about %s", (_name, src) => {
+    const w = warningsOf(src);
+    expect(w.length).toBe(1);
+    expect(w[0].msg).toContain("expression syntax error");
+    expect(errorsOf(src)).toEqual([]);
+  });
+
+  it.each([
+    ["a valid expression", 'AE.expr(p, "wiggle(2, 30)");'],
+    ["a multi-line expression", 'p.expression = "var a = 1;\\nif (time > 1) { a = 2; }\\na * value;";'],
+    ["an empty expression (removes it)", 'p.expression = "";'],
+    ["a built expression (not checked)", 'p.expression = "wiggle(" + n;'],
+  ])("accepts %s", (_name, src) => {
+    expect(lint(src, LIB)).toEqual([]);
+  });
+});
+
 describe("AE namespace", () => {
   it("reads the members from lib.jsx", () => {
     const m = aeMembers(LIB);

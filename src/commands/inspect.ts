@@ -47,34 +47,52 @@ export function parseFrames(spec: string): number[] {
   return res;
 }
 
-export async function cmdSnap(argv: string[]): Promise<number> {
-  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout", "--crop"], ["--sheet"]);
-  const [comp, spec] = p.pos;
-  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]');
-  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
-  const res = str(p, "--res", "half");
-  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
-  const frames = parseFrames(spec);
-  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = abspath(str(p, "--out") || path.join(WORK, "snap", prefix));
+export interface Cell {
+  label: string;
+  file: string;
+}
+
+export const RES = ["full", "half", "third", "quarter"];
+
+/**
+ * Render comp frames to <dir>/<prefix>_fNNNN.png, wait for them and crop them to `crop` (comp pixels) if given.
+ * Returns the exit code and the files.
+ */
+export async function snapFrames(comp: string, frames: number[], dir: string, prefix: string, res: string, crop: number[] | null, snapTimeout?: number): Promise<{ code: number; cells: Cell[] }> {
   mkdirSync(dir, { recursive: true });
   const code = `var c = AE.comp(${jsstr(comp)});\nlog("SIZE " + c.width);\nAE.snap(c, [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});\n`;
-  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout: p.opts["--timeout"] ? Number(p.opts["--timeout"]) : undefined });
-  if (r.code) return r.code;
-  const cells: { label: string; file: string }[] = [];
+  const r = await runSnippet("snap", "snap", code, { undo: false, label: "ae snap", quiet: true, snapTimeout });
+  const cells: Cell[] = [];
+  if (r.code) return { code: r.code, cells };
   const log = readLog(r.log).split("\n");
   const compW = Number(log.find((l) => l.startsWith("SIZE "))?.slice(5));
   for (const line of log) {
     if (!line.startsWith("PNG ")) continue;
     const file = line.slice(4);
     if (crop) cropPng(file, crop, compW);
-    out(file);
     const m = /_f(\d+)\.png$/.exec(file);
     cells.push({ label: "f" + (m ? parseInt(m[1], 10) : "?"), file });
   }
-  if (p.opts["--sheet"] && cells.length) {
+  return { code: 0, cells };
+}
+
+export async function cmdSnap(argv: string[]): Promise<number> {
+  const p = parseArgs(argv, "snap", ["--out", "--prefix", "--res", "--cols", "--width", "--timeout", "--crop"], ["--sheet"]);
+  const [comp, spec] = p.pos;
+  if (!comp || !spec) die('usage: ae snap "Comp" 8,44,90 [--out dir] [--prefix p] [--res full|half|third|quarter] [--crop x,y,w,h] [--sheet] [--cols N] [--width px]');
+  const crop = str(p, "--crop") ? parseBox(str(p, "--crop"), "--crop") : null;
+  const res = str(p, "--res", "half");
+  if (!RES.includes(res)) die("--res must be full|half|third|quarter");
+  const frames = parseFrames(spec);
+  const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
+  // one folder per comp whatever the prefix, as documented: several prefixes of one comp land side by side
+  const dir = abspath(str(p, "--out") || path.join(WORK, "snap", comp.replace(/[^A-Za-z0-9_-]/g, "_")));
+  const r = await snapFrames(comp, frames, dir, prefix, res, crop, p.opts["--timeout"] ? Number(p.opts["--timeout"]) : undefined);
+  if (r.code) return r.code;
+  for (const c of r.cells) out(c.file);
+  if (p.opts["--sheet"] && r.cells.length) {
     const sheet = path.join(dir, prefix + "_sheet.png");
-    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), cells);
+    makeSheet(sheet, int(p, "--cols", 4), int(p, "--width", 640), r.cells);
     out("SHEET " + sheet);
   }
   return 0;

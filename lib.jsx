@@ -23,6 +23,7 @@ var AE = (function () {
     A.tmp = Folder.temp.fsName;      // scratch dir; the runner sets it to $TMPDIR/ae-tools (shell-readable;
                                      // AE's own Folder.temp is .../TemporaryItems, which the shell may not read)
     A.imported = [];                 // FootageItems imported by AE.footage during this script
+    A._touched = {};                 // comp id -> CompItem looked up by AE.comp (post-run expression check)
 
     // ------------------------------------------------------------------ strings
     function pad(n, w) { var s = String(n); while (s.length < w) { s = "0" + s; } return s; }
@@ -39,6 +40,12 @@ var AE = (function () {
         return String(s).replace(/\r\n|\r|\n|\u0003/g, "\\r");
     }
 
+    // A layer of any kind. `instanceof Layer`/`AVLayer` cannot tell: in AE 26.5 instanceof matches only the exact class
+    // (a TextLayer is not an AVLayer, no layer is a Layer; pitfall 17), so layers are recognised by their comp.
+    function isLayer(v) {
+        try { return v !== null && typeof v === "object" && !(v instanceof CompItem) && v.containingComp instanceof CompItem && typeof v.index === "number"; } catch (e) { return false; }
+    }
+    A.isLayer = isLayer;
     // Safe stringify for anything (arrays, host objects, TextDocument, KeyframeEase, Shape...). Never throws.
     A.str = function (v, depth) {
         if (depth === undefined) { depth = 0; }
@@ -61,7 +68,7 @@ var AE = (function () {
             if (typeof Shape !== "undefined" && v instanceof Shape) { return "Shape(" + v.vertices.length + "v" + (v.closed ? ",closed" : "") + ")"; }
             if (typeof MarkerValue !== "undefined" && v instanceof MarkerValue) { return "Marker('" + escText(v.comment) + "')"; }
             if (typeof Property !== "undefined" && (v instanceof Property || v instanceof PropertyGroup)) { return "<prop " + v.name + " (" + v.matchName + ")>"; }
-            if (typeof Layer !== "undefined" && v instanceof Layer) { return "<layer #" + v.index + " " + v.name + ">"; }
+            if (isLayer(v)) { return "<layer #" + v.index + " " + v.name + ">"; }
             if (typeof Item !== "undefined" && v instanceof Item) { return "<" + v.typeName + " " + v.name + " id=" + v.id + ">"; }
             if (t === "object") {
                 if (depth > 3) { return "{...}"; }
@@ -194,7 +201,7 @@ var AE = (function () {
     A._begin = function (logPath, scriptPath, userOffset, tmp, rollback) {
         if (tmp) { A.tmp = tmp; }
         A._rollback = rollback === true;
-        A._buf = []; A._depth = 0; A._undoOpen = false; A.imported = [];
+        A._buf = []; A._depth = 0; A._undoOpen = false; A.imported = []; A._touched = {};
         A._runnerLog = logPath; A._combined = true; A._userOffset = userOffset;
         A.scriptPath = scriptPath;
         A.scriptDir = scriptPath ? String(scriptPath).replace(/\/[^\/]*$/, "") : null;
@@ -222,22 +229,34 @@ var AE = (function () {
         for (var i = 0; i < all.length; i++) { if (name === undefined || all[i].name === name) { out.push(all[i]); } }
         return out;
     };
-    // comp by name (throws if missing or ambiguous) or by numeric id; CompItem passes through
+    // the active comp (timeline/viewer in front); throws when the active item is not a comp
+    A.active = function () {
+        var c = app.project.activeItem;
+        if (!(c instanceof CompItem)) { throw new Error("no active comp: click the comp's timeline or viewer in AE, or name the comp"); }
+        return c;
+    };
+    // comp by name (throws if missing or ambiguous) or by numeric id; CompItem passes through; no argument = the active comp
     A.comp = function (name) {
-        if (name instanceof CompItem) { return name; }
-        if (typeof name === "number") {
-            var byId = app.project.itemByID(name);
-            if (!(byId instanceof CompItem)) { throw new Error("no comp with id " + name); }
-            return byId;
+        var c;
+        if (name instanceof CompItem) {
+            c = name;
+        } else if (name === undefined || name === null || name === "") {
+            c = A.active();
+        } else if (typeof name === "number") {
+            c = app.project.itemByID(name);
+            if (!(c instanceof CompItem)) { throw new Error("no comp with id " + name); }
+        } else {
+            var found = A.comps(String(name));
+            if (found.length === 0) { throw new Error("comp not found: '" + name + "'"); }
+            if (found.length > 1) {
+                var ids = [];
+                for (var i = 0; i < found.length; i++) { ids.push(found[i].id); }
+                throw new Error(found.length + " comps named '" + name + "' (ids " + ids.join(",") + "); use AE.comp(id)");
+            }
+            c = found[0];
         }
-        var found = A.comps(String(name));
-        if (found.length === 0) { throw new Error("comp not found: '" + name + "'"); }
-        if (found.length > 1) {
-            var ids = [];
-            for (var i = 0; i < found.length; i++) { ids.push(found[i].id); }
-            throw new Error(found.length + " comps named '" + name + "' (ids " + ids.join(",") + "); use AE.comp(id)");
-        }
-        return found[0];
+        A._touched[c.id] = c;
+        return c;
     };
     // layer by 1-based index or exact name (throws if missing or ambiguous)
     A.layer = function (comp, nameOrIndex) {
@@ -321,6 +340,37 @@ var AE = (function () {
         if (!p) { throw new Error("no transform property '" + key + "' on " + layer.name); }
         return p;
     };
+    // property below a layer by path of names or matchNames ("Transform/Position", "Effects/Gaussian Blur/Blurriness",
+    // a number for an index), a transform alias ("pos"), or one name/matchName searched recursively. Throws if missing.
+    A.prop = function (L, path) {
+        if (TF.hasOwnProperty(path)) { return A.tf(L, path); }
+        var parts = String(path).split("/"), g = L;
+        for (var i = 0; i < parts.length; i++) {
+            var next = null;
+            try { next = g.property(/^\d+$/.test(parts[i]) ? Number(parts[i]) : parts[i]); } catch (e) { }
+            if (!next && i === 0) { next = A.findProp(g, parts[i]); }
+            if (!next) { throw new Error("no property '" + parts.slice(0, i + 1).join("/") + "' on '" + L.name + "'"); }
+            g = next;
+        }
+        return g;
+    };
+    // layer that owns a property
+    A.layerOf = function (p) { return p.propertyGroup(p.propertyDepth); };
+    // "Transform/Position": display names from below the layer down to the property
+    A.propPath = function (p) {
+        var parts = [p.name];
+        for (var i = 1; i < p.propertyDepth; i++) { parts.unshift(p.propertyGroup(i).name); }
+        return parts.join("/");
+    };
+    // calls fn(prop) for every leaf property below a layer or group
+    function eachProp(g, fn) {
+        for (var i = 1; i <= g.numProperties; i++) {
+            var p;
+            try { p = g.property(i); } catch (e) { continue; }
+            if (!p) { continue; }
+            if (p.propertyType === PropertyType.PROPERTY) { fn(p); } else { eachProp(p, fn); }
+        }
+    }
     // path in the project panel, e.g. "_DELIVERY/Comps"
     A.itemPath = function (item) {
         var parts = [], f = item.parentFolder;
@@ -839,10 +889,11 @@ var AE = (function () {
         return L;
     };
 
-    // Effect by matchName, optionally renamed. Returns it, fetched fresh (adding an effect invalidates earlier
-    // references to the layer's effects: get those again with AE.fx).
+    // Effect by matchName or display name (any case; see AE.effectName), optionally renamed. Returns it, fetched fresh
+    // (adding an effect invalidates earlier references to the layer's effects: get those again with AE.fx).
     A.addEffect = function (L, matchName, name) {
         var fx = L.property("ADBE Effect Parade");
+        if (!fx.canAddProperty(matchName)) { matchName = A.effectName(matchName); }   // a display name (or a typo: throws)
         if (!fx.canAddProperty(matchName)) { throw new Error("addEffect: '" + matchName + "' cannot be added to '" + L.name + "'"); }
         fx.addProperty(matchName);
         var i = L.property("ADBE Effect Parade").numProperties;
@@ -890,6 +941,291 @@ var AE = (function () {
         }
         while (prop.numKeys > 0) { prop.removeKey(prop.numKeys); }
         return prop;
+    };
+
+    // ------------------------------------------------------------------ selection / playhead
+    // playhead (current time indicator) of a comp in comp frames; with `frame`, moves it there first
+    A.cti = function (comp, frame) {
+        comp = A.comp(comp);
+        if (frame !== undefined && frame !== null) { comp.time = frame * comp.frameDuration; }
+        return Math.round(comp.time / comp.frameDuration * 1000) / 1000;
+    };
+    // what the user has selected: {comp (active comp or null), frame (its playhead), layers, props (properties and
+    // groups), keys: [{prop, keys: [key index]}], items (Project panel)}
+    A.selected = function () {
+        var r = { comp: null, frame: null, layers: [], props: [], keys: [], items: [] }, i;
+        try { for (i = 0; i < app.project.selection.length; i++) { r.items.push(app.project.selection[i]); } } catch (e) { }
+        var c = app.project.activeItem;
+        if (!(c instanceof CompItem)) { return r; }
+        r.comp = c;
+        r.frame = Math.round(c.time / c.frameDuration * 1000) / 1000;
+        var sl = c.selectedLayers, sp = c.selectedProperties;
+        for (i = 0; i < sl.length; i++) { r.layers.push(sl[i]); }
+        for (i = 0; i < sp.length; i++) {
+            r.props.push(sp[i]);
+            if (sp[i].propertyType !== PropertyType.PROPERTY) { continue; }
+            var sk = [];
+            try { sk = sp[i].selectedKeys; } catch (e2) { }
+            if (sk.length) { r.keys.push({ prop: sp[i], keys: sk }); }
+        }
+        return r;
+    };
+    // text report of AE.selected() (what `ae sel` prints)
+    A.sel = function () {
+        var s = A.selected(), out = [], i, j;
+        if (s.comp) {
+            var c = s.comp, fd = c.frameDuration;
+            out.push("COMP '" + c.name + "' id=" + c.id + " " + c.width + "x" + c.height + " " + num(c.frameRate) + "fps dur=" + num(c.duration / fd) +
+                "f playhead=f" + s.frame + " (" + num(c.time) + "s) work=" + num(c.workAreaStart / fd) + "-" + num((c.workAreaStart + c.workAreaDuration) / fd) + "f");
+            for (i = 0; i < s.layers.length; i++) {
+                var L = s.layers[i];
+                out.push("LAYER #" + L.index + " '" + L.name + "' [" + layerKind(L) + "] " + A.span(L));
+            }
+            for (i = 0; i < s.props.length; i++) {
+                var p = s.props[i], PL = A.layerOf(p);
+                var line = "PROP #" + PL.index + " '" + PL.name + "' " + A.propPath(p) + " (" + p.matchName + ")";
+                if (p.propertyType === PropertyType.PROPERTY) {
+                    try { line += " = " + A.str(p.valueAtTime(c.time, false)); } catch (e1) { }
+                    if (p.numKeys) { line += " keys=" + p.numKeys; }
+                    var sk = [];
+                    try { sk = p.selectedKeys; } catch (e2) { }
+                    if (sk.length) {
+                        var ks = [];
+                        for (j = 0; j < sk.length; j++) { ks.push(sk[j] + "@f" + num(p.keyTime(sk[j]) / fd)); }
+                        line += " selected keys: " + ks.join(", ");
+                    }
+                    if (hasExpr(p)) { line += " (expression)"; }
+                } else {
+                    line += " (group)";
+                }
+                out.push(line);
+            }
+            if (!s.layers.length && !s.props.length) { out.push("(no layers selected)"); }
+        } else {
+            out.push("COMP none (the active item is not a comp)");
+        }
+        for (i = 0; i < s.items.length; i++) {
+            var it = s.items[i];
+            out.push("ITEM '" + it.name + "' [" + it.typeName + "] id=" + it.id + (A.itemPath(it) ? " folder='" + A.itemPath(it) + "'" : ""));
+        }
+        return out.join("\n");
+    };
+    // select exactly these layers (one comp; the others get deselected). Returns the array.
+    A.select = function (layers) {
+        if (!(layers instanceof Array)) { layers = [layers]; }
+        if (!layers.length) { return layers; }
+        var c = layers[0].containingComp;
+        for (var i = 1; i <= c.numLayers; i++) { try { if (c.layer(i).selected) { c.layer(i).selected = false; } } catch (e) { } }
+        for (var j = 0; j < layers.length; j++) { layers[j].selected = true; }
+        return layers;
+    };
+    // open a comp in the viewer (and move its playhead to `frame`) to show the user a result
+    A.show = function (comp, frame) {
+        comp = A.comp(comp);
+        comp.openInViewer();
+        if (frame !== undefined && frame !== null) { A.cti(comp, frame); }
+        return comp;
+    };
+
+    // ------------------------------------------------------------------ markers
+    function markerTarget(t) {
+        if (t instanceof CompItem || isLayer(t)) { return t; }
+        return A.comp(t);
+    }
+    function markerProp(t) {
+        return t instanceof CompItem ? t.markerProperty : t.property("ADBE Marker");
+    }
+    // markers of a comp (or comp name) or a layer: [{index, frame, time, comment, duration (frames), chapter, url, label}]
+    A.markers = function (target) {
+        var t = markerTarget(target), p = markerProp(t), fd = A.fd(t), out = [];
+        for (var k = 1; k <= p.numKeys; k++) {
+            var mv = p.keyValue(k), o = { index: k, time: p.keyTime(k), frame: Math.round(p.keyTime(k) / fd * 1000) / 1000 };
+            o.comment = mv.comment;
+            o.duration = Math.round(mv.duration / fd * 1000) / 1000;
+            o.chapter = mv.chapter;
+            o.url = mv.url;
+            try { o.label = mv.label; } catch (e) { o.label = 0; }
+            out.push(o);
+        }
+        return out;
+    };
+    // add a marker at comp frame `frame`. o: {duration (frames), label (0-16), chapter, url}. Returns the key index.
+    A.marker = function (target, frame, comment, o) {
+        o = o || {};
+        var t = markerTarget(target), p = markerProp(t), fd = A.fd(t);
+        var mv = new MarkerValue(comment === undefined || comment === null ? "" : String(comment));
+        if (o.duration) { mv.duration = o.duration * fd; }
+        if (o.chapter) { mv.chapter = String(o.chapter); }
+        if (o.url) { mv.url = String(o.url); }
+        if (o.label !== undefined) { mv.label = o.label; }
+        p.setValueAtTime(frame * fd, mv);
+        return p.nearestKeyIndex(frame * fd);
+    };
+    // remove markers whose comment contains `match` (string), matches it (RegExp), or all. Returns how many.
+    A.removeMarkers = function (target, match) {
+        var t = markerTarget(target), p = markerProp(t), n = 0;
+        for (var k = p.numKeys; k >= 1; k--) {
+            var c = p.keyValue(k).comment;
+            if (match === undefined || match === null || (match instanceof RegExp ? match.test(c) : c.indexOf(String(match)) >= 0)) { p.removeKey(k); n++; }
+        }
+        return n;
+    };
+    function markerText(m) {
+        return "'" + escText(m.comment) + "'" + (m.duration ? " dur=" + num(m.duration) + "f" : "") + (m.label ? " label=" + m.label : "") +
+            (m.chapter ? " chapter='" + escText(m.chapter) + "'" : "") + (m.url ? " url=" + m.url : "");
+    }
+    // what `ae markers` prints: comp and layer markers of each comp, by frame
+    A.markerReport = function (comps) {
+        var out = [];
+        for (var i = 0; i < comps.length; i++) {
+            var c = A.comp(comps[i]), rows = [], ms, j, k;
+            ms = A.markers(c);
+            for (j = 0; j < ms.length; j++) { rows.push({ f: ms[j].frame, s: "f" + num(ms[j].frame) + " comp " + markerText(ms[j]) }); }
+            for (k = 1; k <= c.numLayers; k++) {
+                ms = A.markers(c.layer(k));
+                for (j = 0; j < ms.length; j++) { rows.push({ f: ms[j].frame, s: "f" + num(ms[j].frame) + " #" + k + " '" + c.layer(k).name + "' " + markerText(ms[j]) }); }
+            }
+            if (!rows.length) { continue; }
+            rows.sort(function (a, b) { return a.f - b.f; });
+            out.push("COMP '" + c.name + "' id=" + c.id);
+            for (j = 0; j < rows.length; j++) { out.push("  " + rows[j].s); }
+        }
+        if (!out.length) { out.push("no markers"); }
+        return out.join("\n");
+    };
+
+    // ------------------------------------------------------------------ expressions
+    // Error text of a property's expression, "" when there is none or it evaluates fine. AE 26.5 never throws when a
+    // broken expression is set and leaves expressionEnabled true: expressionError is the only sign (pitfall 16).
+    A.exprError = function (p) {
+        try { if (!p.canSetExpression || p.expression === "") { return ""; } } catch (e0) { return ""; }
+        var err = "";
+        try { p.valueAtTime(A.layerOf(p).containingComp.time, false); err = p.expressionError || ""; } catch (e) { err = e.message; }
+        err = String(err).replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+        // AE: "Expression disabled. Error at line 1 in property 'X' of layer 3 ('Box') in comp 'Main'. Error: <what>"
+        var at = /Error at line (\d+)/i.exec(err), what = /(\w*Error: .*)$/.exec(err.replace(/^.*? in comp .*?\. /, ""));
+        if (at && what) { err = "line " + at[1] + ": " + what[1]; }
+        return err.length > 300 ? err.substr(0, 300) + "..." : err;
+    };
+    // set an expression and check it: on an error the previous expression is restored and an Error is thrown
+    A.expr = function (p, code) {
+        var old = p.expression, oldOn = p.expressionEnabled, err = "";
+        try { p.expression = String(code); } catch (e) { err = e.message; }
+        if (!err) { err = A.exprError(p); }
+        if (err) {
+            try { p.expression = old; p.expressionEnabled = oldOn; } catch (e2) { }
+            throw new Error("expression on '" + A.layerOf(p).name + "' " + A.propPath(p) + ": " + err);
+        }
+        return p;
+    };
+    // expression errors in a comp: ["'Main' #3 'Title' Transform/Position: <error>"]. Stops after `deadline` (ms timestamp).
+    A.exprErrors = function (comp, deadline) {
+        comp = A.comp(comp);
+        var out = [];
+        for (var i = 1; i <= comp.numLayers; i++) {
+            if (deadline && new Date().getTime() > deadline) { break; }
+            var L = comp.layer(i);
+            eachProp(L, function (p) {
+                var e = A.exprError(p);
+                if (e) { out.push("'" + comp.name + "' #" + L.index + " '" + L.name + "' " + A.propPath(p) + ": " + e); }
+            });
+        }
+        return out;
+    };
+    // after a mutating `ae run`: WARN for every expression error in the comps the script looked up and the active comp
+    A._checkExprs = function () {
+        var list = [], seen = {}, k, deadline = new Date().getTime() + 1500;
+        for (k in A._touched) { if (A._touched.hasOwnProperty(k)) { list.push(A._touched[k]); seen[k] = true; } }
+        try { if (app.project.activeItem instanceof CompItem && !seen[app.project.activeItem.id]) { list.push(app.project.activeItem); } } catch (e0) { }
+        app.beginSuppressDialogs();
+        try {
+            for (var i = 0; i < list.length; i++) {
+                var errs = [];
+                try { errs = A.exprErrors(list[i], deadline); } catch (e) { continue; }   // e.g. a comp the script removed
+                for (var j = 0; j < errs.length; j++) { A._buf.push("WARN expression error " + errs[j]); }
+                if (new Date().getTime() > deadline) { A._buf.push("WARN expression check stopped after 1.5 s: ae health checks a whole comp"); break; }
+            }
+        } finally {
+            try { app.endSuppressDialogs(false); } catch (e1) { }
+        }
+    };
+
+    // ------------------------------------------------------------------ effects
+    // matchName of an effect from its matchName or display name (any case); throws with suggestions
+    A.effectName = function (name) {
+        var list = app.effects, low = String(name).toLowerCase(), near = [], i;
+        for (i = 0; i < list.length; i++) { if (list[i].matchName === name) { return name; } }
+        for (i = 0; i < list.length; i++) { if (list[i].displayName.toLowerCase() === low) { return list[i].matchName; } }
+        for (i = 0; i < list.length && near.length < 8; i++) {
+            if (list[i].displayName.toLowerCase().indexOf(low) >= 0 || list[i].matchName.toLowerCase().indexOf(low) >= 0) { near.push(list[i].displayName + " (" + list[i].matchName + ")"); }
+        }
+        throw new Error("no effect '" + name + "'" + (near.length ? "; did you mean: " + near.join(", ") : "") + " (ae effects <word> searches them)");
+    };
+    // set several properties of an effect or group: {name|matchName|index: value}. Hex strings for colours,
+    // true/false for checkboxes. Throws (listing the valid names) for an unknown key, or when a property is keyed.
+    A.setProps = function (g, props) {
+        for (var k in props) {
+            if (!props.hasOwnProperty(k)) { continue; }
+            var p = null;
+            try { p = g.property(/^\d+$/.test(k) ? Number(k) : k); } catch (e) { }
+            if (!p) { p = A.findProp(g, k); }
+            if (!p) {
+                var names = [];
+                for (var i = 1; i <= g.numProperties; i++) { names.push(g.property(i).name); }
+                throw new Error("'" + g.name + "' has no property '" + k + "' (it has: " + names.join(", ") + ")");
+            }
+            var v = props[k];
+            if (typeof v === "boolean") { v = v ? 1 : 0; }
+            if (typeof v === "string" && p.propertyValueType === PropertyValueType.COLOR) { v = A.hex(v, true); }
+            A.set(p, v);
+        }
+        return g;
+    };
+
+    // ------------------------------------------------------------------ geometry
+    // a layer-space point in comp pixels at time t (seconds), through the parent chain; null when a 3D layer is involved
+    function toComp(L, x, y, t) {
+        for (var guard = 0; L && guard < 64; guard++) {
+            if (L.threeDLayer) { return null; }
+            var tg = L.property("ADBE Transform Group"), a = tg.property("ADBE Anchor Point").valueAtTime(t, false);
+            var s = tg.property("ADBE Scale").valueAtTime(t, false), r = tg.property("ADBE Rotate Z").valueAtTime(t, false) * Math.PI / 180;
+            var pp = tg.property("ADBE Position"), px, py;
+            if (pp.dimensionsSeparated) {
+                px = tg.property("ADBE Position_0").valueAtTime(t, false);
+                py = tg.property("ADBE Position_1").valueAtTime(t, false);
+            } else {
+                var pv = pp.valueAtTime(t, false);
+                px = pv[0]; py = pv[1];
+            }
+            var dx = (x - a[0]) * s[0] / 100, dy = (y - a[1]) * s[1] / 100;
+            x = dx * Math.cos(r) - dy * Math.sin(r) + px;
+            y = dx * Math.sin(r) + dy * Math.cos(r) + py;
+            L = L.parent;
+        }
+        return [x, y];
+    }
+    function boundsAt(L, t) {
+        if (typeof L.sourceRectAtTime !== "function" || L.nullLayer) { return null; }   // cameras, lights; nulls draw nothing
+        var r;
+        try { r = L.sourceRectAtTime(t, false); } catch (e) { return null; }
+        var xs = [r.left, r.left + r.width], ys = [r.top, r.top + r.height], b = null;
+        for (var i = 0; i < 2; i++) {
+            for (var j = 0; j < 2; j++) {
+                var q = toComp(L, xs[i], ys[j], t);
+                if (!q) { return null; }
+                if (!b) { b = [q[0], q[1], q[0], q[1]]; }
+                b[0] = Math.min(b[0], q[0]); b[1] = Math.min(b[1], q[1]); b[2] = Math.max(b[2], q[0]); b[3] = Math.max(b[3], q[1]);
+            }
+        }
+        return b;
+    }
+    // bounding box [left, top, right, bottom] of a layer's content in comp pixels at comp frame f (default: the playhead).
+    // 2D only: null for 3D layers (or a 3D parent), cameras, lights and nulls. Text and shape layers use their real extents.
+    A.bounds = function (L, f) {
+        var c = L.containingComp, b = boundsAt(L, f === undefined || f === null ? c.time : f * c.frameDuration);
+        if (!b) { return null; }
+        for (var i = 0; i < 4; i++) { b[i] = Math.round(b[i] * 10) / 10; }
+        return b;
     };
 
     // ------------------------------------------------------------------ dump
@@ -1050,6 +1386,64 @@ var AE = (function () {
         } catch (e8) { }
         return s;
     }
+    function compHeader(comp) {
+        var fd = comp.frameDuration;
+        return "COMP '" + comp.name + "' id=" + comp.id + " " + comp.width + "x" + comp.height + " " + num(comp.frameRate) + "fps dur=" +
+            num(comp.duration / fd) + "f (" + num(comp.duration) + "s) layers=" + comp.numLayers + " folder='" + A.itemPath(comp) + "'" +
+            (comp.workAreaStart ? " work=" + num(comp.workAreaStart / fd) + "+" + num(comp.workAreaDuration / fd) + "f" : "");
+    }
+    // dump lines of one layer (A.dump without the precomp recursion); `at` in seconds or undefined
+    function dumpLayer(L, o, ind, at) {
+        var lines = [], fd = L.containingComp.frameDuration, maxKeys = o.maxKeys || 30;
+        var s = ind + "#" + L.index + " '" + L.name + "' [" + layerKind(L) + "]" + sourceText(L) + " " + A.span(L);
+        try { if (L.stretch !== 100) { s += " stretch=" + num(L.stretch); } } catch (e0) { }
+        if (L.parent) { s += " parent=#" + L.parent.index + "'" + L.parent.name + "'"; }
+        try { if (L.trackMatteType !== TrackMatteType.NO_TRACK_MATTE) { s += " matte=" + matteName(L.trackMatteType) + (L.trackMatteLayer ? "<#" + L.trackMatteLayer.index + "'" + L.trackMatteLayer.name + "'" : ""); } } catch (e1) { }
+        try { if (L.isTrackMatte) { s += " IS-MATTE"; } } catch (e2) { }
+        s += L.enabled ? "" : " DISABLED";
+        try { if (L.solo) { s += " SOLO"; } if (L.shy) { s += " shy"; } if (L.locked) { s += " locked"; } } catch (e3) { }
+        try { if (L.threeDLayer) { s += " 3D"; } if (L.hasAudio) { s += L.audioEnabled ? " audio" : " audio-off"; } if (L.timeRemapEnabled) { s += " timeremap"; } if (L.motionBlur) { s += " mb"; } } catch (e4) { }
+        try { if (L.blendingMode !== BlendingMode.NORMAL) { s += " blend=" + L.blendingMode; } } catch (e5) { }
+        lines.push(s);
+        // transform
+        var tg = L.property("ADBE Transform Group"), tv = [];
+        if (tg) {
+            for (var j = 1; j <= tg.numProperties; j++) {
+                var tp = tg.property(j);
+                try {
+                    if (!tp || tp.propertyType !== PropertyType.PROPERTY) { continue; }
+                    if (tp.matchName.indexOf("ADBE Position_") === 0 && !tg.property("ADBE Position").dimensionsSeparated) { continue; }
+                    if (tp.matchName === "ADBE Position" && tp.dimensionsSeparated) { continue; }
+                    if (!L.threeDLayer && (tp.matchName === "ADBE Orientation" || tp.matchName === "ADBE Rotate X" || tp.matchName === "ADBE Rotate Y")) { continue; }
+                    if (tp.matchName === "ADBE Envir Appear in Reflect") { continue; }
+                    var ee = "";
+                    if (tp.expressionEnabled && tp.expression !== "") { ee = "~"; try { if (tp.expressionError) { ee = "~!"; } } catch (e8) { } }
+                    tv.push(tp.name.replace(/ /g, "") + "=" + A.str(at === undefined ? tp.value : tp.valueAtTime(at, false)) + (tp.numKeys ? "*" : "") + ee);
+                } catch (e6) { }
+            }
+            lines.push(ind + "    tf " + tv.join(" "));
+        }
+        if (L instanceof TextLayer) {
+            try { lines.push(ind + "    text " + textInfo(L, o.rawText, at)); } catch (e7) { lines.push(ind + "    text ?" + e7.message); }
+        }
+        // effects list
+        var fx = L.property("ADBE Effect Parade");
+        if (fx && fx.numProperties > 0) {
+            var names = [];
+            for (var fi = 1; fi <= fx.numProperties; fi++) {
+                var ef = fx.property(fi), pv = fxParams(ef, at);
+                names.push("'" + ef.name + "'" + (ef.name !== ef.matchName ? " (" + ef.matchName + ")" : "") + (ef.enabled ? "" : " OFF") + (pv ? " {" + pv + "}" : ""));
+            }
+            lines.push(ind + "    fx " + names.join("; "));
+        }
+        if (o.props) {
+            walkStatic(L, "", lines, ind + "    prop ", at);
+        }
+        if (o.keys !== false) {
+            walkAnimated(L, "", fd, lines, ind + "    ", maxKeys);
+        }
+        return lines;
+    }
     // Readable tree of a comp. o: {depth:0 (precomp recursion), keys:true, maxKeys:30, filter:name|RegExp,
     //   rawText:false (true = read expression-driven Source Text raw; mutates, so run inside AE.run),
     //   at: comp frame for the values (default: the comp's current time), props: also every changed static value
@@ -1060,62 +1454,19 @@ var AE = (function () {
         comp = A.comp(comp);
         o = o || {};
         var ind = _ind || "", lines = [], fd = comp.frameDuration;
-        var maxKeys = o.maxKeys || 30;
         var at = o.atTime !== undefined ? o.atTime : (o.at !== undefined && o.at !== null ? o.at * fd : undefined);
         _seen = _seen || {};
-        lines.push(ind + "COMP '" + comp.name + "' id=" + comp.id + " " + comp.width + "x" + comp.height + " " + num(comp.frameRate) + "fps dur=" +
-            num(comp.duration / fd) + "f (" + num(comp.duration) + "s) layers=" + comp.numLayers + " folder='" + A.itemPath(comp) + "'" +
-            (comp.workAreaStart ? " work=" + num(comp.workAreaStart / fd) + "+" + num(comp.workAreaDuration / fd) + "f" : ""));
+        lines.push(ind + compHeader(comp));
+        var cm = A.markers(comp);
+        if (cm.length) {
+            var ms = [];
+            for (var m = 0; m < cm.length; m++) { ms.push("f" + num(cm[m].frame) + " " + markerText(cm[m])); }
+            lines.push(ind + "    markers " + ms.join(" | "));
+        }
         for (var i = 1; i <= comp.numLayers; i++) {
             var L = comp.layer(i);
             if (o.filter && !((typeof o.filter === "string" && L.name === o.filter) || (o.filter instanceof RegExp && o.filter.test(L.name)))) { continue; }
-            var s = ind + "#" + i + " '" + L.name + "' [" + layerKind(L) + "]" + sourceText(L) + " " + A.span(L);
-            try { if (L.stretch !== 100) { s += " stretch=" + num(L.stretch); } } catch (e0) { }
-            if (L.parent) { s += " parent=#" + L.parent.index + "'" + L.parent.name + "'"; }
-            try { if (L.trackMatteType !== TrackMatteType.NO_TRACK_MATTE) { s += " matte=" + matteName(L.trackMatteType) + (L.trackMatteLayer ? "<#" + L.trackMatteLayer.index + "'" + L.trackMatteLayer.name + "'" : ""); } } catch (e1) { }
-            try { if (L.isTrackMatte) { s += " IS-MATTE"; } } catch (e2) { }
-            s += L.enabled ? "" : " DISABLED";
-            try { if (L.solo) { s += " SOLO"; } if (L.shy) { s += " shy"; } if (L.locked) { s += " locked"; } } catch (e3) { }
-            try { if (L.threeDLayer) { s += " 3D"; } if (L.hasAudio) { s += L.audioEnabled ? " audio" : " audio-off"; } if (L.timeRemapEnabled) { s += " timeremap"; } if (L.motionBlur) { s += " mb"; } } catch (e4) { }
-            try { if (L.blendingMode !== BlendingMode.NORMAL) { s += " blend=" + L.blendingMode; } } catch (e5) { }
-            lines.push(s);
-            // transform
-            var tg = L.property("ADBE Transform Group"), tv = [];
-            if (tg) {
-                for (var j = 1; j <= tg.numProperties; j++) {
-                    var tp = tg.property(j);
-                    try {
-                        if (!tp || tp.propertyType !== PropertyType.PROPERTY) { continue; }
-                        if (tp.matchName.indexOf("ADBE Position_") === 0 && !tg.property("ADBE Position").dimensionsSeparated) { continue; }
-                        if (tp.matchName === "ADBE Position" && tp.dimensionsSeparated) { continue; }
-                        if (!L.threeDLayer && (tp.matchName === "ADBE Orientation" || tp.matchName === "ADBE Rotate X" || tp.matchName === "ADBE Rotate Y")) { continue; }
-                        if (tp.matchName === "ADBE Envir Appear in Reflect") { continue; }
-                        var ee = "";
-                        if (tp.expressionEnabled && tp.expression !== "") { ee = "~"; try { if (tp.expressionError) { ee = "~!"; } } catch (e8) { } }
-                        tv.push(tp.name.replace(/ /g, "") + "=" + A.str(at === undefined ? tp.value : tp.valueAtTime(at, false)) + (tp.numKeys ? "*" : "") + ee);
-                    } catch (e6) { }
-                }
-                lines.push(ind + "    tf " + tv.join(" "));
-            }
-            if (L instanceof TextLayer) {
-                try { lines.push(ind + "    text " + textInfo(L, o.rawText, at)); } catch (e7) { lines.push(ind + "    text ?" + e7.message); }
-            }
-            // effects list
-            var fx = L.property("ADBE Effect Parade");
-            if (fx && fx.numProperties > 0) {
-                var names = [];
-                for (var fi = 1; fi <= fx.numProperties; fi++) {
-                    var ef = fx.property(fi), pv = fxParams(ef, at);
-                    names.push("'" + ef.name + "'" + (ef.name !== ef.matchName ? " (" + ef.matchName + ")" : "") + (ef.enabled ? "" : " OFF") + (pv ? " {" + pv + "}" : ""));
-                }
-                lines.push(ind + "    fx " + names.join("; "));
-            }
-            if (o.props) {
-                walkStatic(L, "", lines, ind + "    prop ", at);
-            }
-            if (o.keys !== false) {
-                walkAnimated(L, "", fd, lines, ind + "    ", maxKeys);
-            }
+            lines = lines.concat(dumpLayer(L, o, ind, at));
             if (o.depth > 0 && L.source instanceof CompItem && !_seen[L.source.id]) {
                 _seen[L.source.id] = true;
                 var sub = {};
@@ -1152,6 +1503,193 @@ var AE = (function () {
             }
         } else if (mainName) {
             out.push("(main comp '" + mainName + "' not found)");
+        }
+        return out.join("\n");
+    };
+
+    // ------------------------------------------------------------------ health / find
+    function usedNames(it) {
+        var u = [];
+        try { for (var i = 0; i < it.usedIn.length; i++) { u.push("'" + it.usedIn[i].name + "'"); } } catch (e) { }
+        return u.length ? u.join(", ") : "no comp";
+    }
+    function clip(s, n) {
+        s = escText(s);
+        return s.length > (n || 120) ? s.substr(0, n || 120) + "..." : s;
+    }
+    // Problems a project and some comps have: missing footage and fonts, expression errors, layers that are never
+    // visible or sit off screen, text that crosses the frame edge (or the safe margin, o.safe = % of each side).
+    // Lines start with "WARN" (a problem) or "info"; the last line counts the problems. o: {safe: 0, samples: 5}
+    A.health = function (comps, o) {
+        o = o || {};
+        var out = [], n = 0, i, j, k;
+        function warn(s) { out.push("WARN " + s); n++; }
+        var foot = A.items(FootageItem), unused = [];
+        for (i = 0; i < foot.length; i++) {
+            var it = foot[i], isFile = false;
+            try { isFile = it.mainSource instanceof FileSource; } catch (e0) { }
+            if (!isFile) { continue; }
+            if (it.footageMissing) {
+                var fp = "";
+                try { fp = it.file ? " " + it.file.fsName : ""; } catch (e1) { }
+                warn("missing footage '" + it.name + "' id=" + it.id + fp + " (used in " + usedNames(it) + ")");
+            } else if (it.usedIn.length === 0) {
+                unused.push("'" + it.name + "'");
+            }
+        }
+        try {
+            var mf = app.fonts.missingOrSubstitutedFonts, fn = [];
+            for (i = 0; i < mf.length; i++) { fn.push(mf[i].postScriptName); }
+            if (fn.length) { warn("missing or substituted fonts: " + fn.join(", ")); }
+        } catch (e2) { }
+        if (unused.length) { out.push("info unused footage (" + unused.length + "): " + unused.slice(0, 15).join(", ") + (unused.length > 15 ? ", ..." : "")); }
+        var byName = {}, all = A.comps();
+        for (i = 0; i < all.length; i++) { k = "n" + all[i].name; if (!byName[k]) { byName[k] = []; } byName[k].push(all[i].id); }
+        for (k in byName) {
+            if (byName.hasOwnProperty(k) && byName[k].length > 1) { out.push("info " + byName[k].length + " comps named '" + k.substr(1) + "' (ids " + byName[k].join(",") + "): use AE.comp(id)"); }
+        }
+        var m = (o.safe || 0) / 100, samples = o.samples || 5;
+        for (i = 0; i < comps.length; i++) {
+            var c = A.comp(comps[i]), fd = c.frameDuration, W = c.width, H = c.height;
+            out.push("COMP '" + c.name + "' id=" + c.id);
+            var errs = A.exprErrors(c);
+            for (j = 0; j < errs.length; j++) { warn("expression error " + errs[j]); }
+            for (j = 1; j <= c.numLayers; j++) {
+                var L = c.layer(j), tag = "'" + c.name + "' #" + j + " '" + L.name + "'";
+                if (L.outPoint <= 0 || L.inPoint >= c.duration) {
+                    if (L.enabled) { warn("never visible " + tag + " " + A.span(L) + " (the comp runs 0.." + num(c.duration / fd) + "f)"); }
+                    continue;
+                }
+                var skip = !L.enabled || typeof L.sourceRectAtTime !== "function" || L.nullLayer || L.adjustmentLayer;
+                try { skip = skip || L.guideLayer || L.isTrackMatte || !L.hasVideo; } catch (e3) { }
+                if (skip) { continue; }
+                var a = Math.max(L.inPoint, 0), b = Math.min(L.outPoint, c.duration) - fd, got = 0, off = 0, edge = [];
+                for (var s = 0; s < samples; s++) {
+                    var t = samples === 1 || b <= a ? a : a + (b - a) * s / (samples - 1);
+                    var bb = boundsAt(L, t);
+                    if (!bb) { break; }
+                    if (bb[2] - bb[0] <= 0 && bb[3] - bb[1] <= 0) { break; }   // no content (an empty shape layer)
+                    if (A.tf(L, "opacity").valueAtTime(t, false) === 0) { continue; }
+                    got++;
+                    if (bb[2] <= 0 || bb[0] >= W || bb[3] <= 0 || bb[1] >= H) { off++; }
+                    else if (L instanceof TextLayer && (bb[0] < W * m - 0.5 || bb[1] < H * m - 0.5 || bb[2] > W * (1 - m) + 0.5 || bb[3] > H * (1 - m) + 0.5)) {
+                        edge.push("f" + Math.round(t / fd));
+                    }
+                }
+                if (got && off === got) { warn("off screen " + tag + ": outside the frame at every sampled frame (" + got + ")"); }
+                if (edge.length) { warn("text " + tag + " crosses the " + (m ? o.safe + "% safe margin" : "frame edge") + " at " + edge.join(",")); }
+            }
+        }
+        out.push(n ? n + " problem(s)" : "no problems found");
+        return out.join("\n");
+    };
+    // Search the project. o: {regex: false, scopes: "name,text,expr,file,effect,marker", comp: name (only this comp)}.
+    // Text of expression-driven Source Text is read post-expression at the layer's last frame. Returns report lines.
+    A.find = function (query, o) {
+        o = o || {};
+        var re = o.regex ? new RegExp(query, "i") : null, q = String(query).toLowerCase(), out = [], i, j, k, ms;
+        var scopes = "," + (o.scopes || "name,text,expr,file,effect,marker") + ",";
+        function on(x) { return scopes.indexOf("," + x + ",") >= 0; }
+        function hit(v) { v = String(v); return re ? re.test(v) : v.toLowerCase().indexOf(q) >= 0; }
+        if (!o.comp) {
+            var items = A.items();
+            for (i = 0; i < items.length; i++) {
+                var it = items[i], where = A.itemPath(it) ? " folder='" + A.itemPath(it) + "'" : "";
+                if (on("name") && hit(it.name)) { out.push("name   " + it.typeName + " '" + it.name + "' id=" + it.id + where); }
+                try {
+                    if (on("file") && it instanceof FootageItem && it.file && hit(it.file.fsName)) { out.push("file   '" + it.name + "' id=" + it.id + " " + it.file.fsName + " (used in " + usedNames(it) + ")"); }
+                } catch (e0) { }
+            }
+        }
+        var comps = o.comp ? [A.comp(o.comp)] : A.comps();
+        for (i = 0; i < comps.length; i++) {
+            var c = comps[i], fd = c.frameDuration;
+            if (on("marker")) {
+                ms = A.markers(c);
+                for (k = 0; k < ms.length; k++) { if (hit(ms[k].comment)) { out.push("marker '" + c.name + "' f" + num(ms[k].frame) + " comp: '" + clip(ms[k].comment) + "'"); } }
+            }
+            for (j = 1; j <= c.numLayers; j++) {
+                var L = c.layer(j), tag = "'" + c.name + "' #" + j + " '" + L.name + "'";
+                if (on("name") && hit(L.name)) { out.push("layer  " + tag); }
+                if (on("text") && L instanceof TextLayer) {
+                    var p = A.textProp(L), texts = [];
+                    if (p.numKeys > 0) { for (k = 1; k <= p.numKeys; k++) { texts.push(p.keyValue(k).text); } }
+                    else { texts.push(p.valueAtTime(hasExpr(p) ? Math.max(L.inPoint, L.outPoint - fd) : 0, false).text); }
+                    for (k = 0; k < texts.length; k++) { if (hit(texts[k])) { out.push("text   " + tag + ": '" + clip(texts[k]) + "'"); break; } }
+                }
+                if (on("effect")) {
+                    var fx = L.property("ADBE Effect Parade");
+                    for (k = 1; fx && k <= fx.numProperties; k++) {
+                        if (hit(fx.property(k).name) || hit(fx.property(k).matchName)) { out.push("effect " + tag + ": " + fx.property(k).name + " (" + fx.property(k).matchName + ")"); }
+                    }
+                }
+                if (on("marker")) {
+                    ms = A.markers(L);
+                    for (k = 0; k < ms.length; k++) { if (hit(ms[k].comment)) { out.push("marker " + tag + " f" + num(ms[k].frame) + ": '" + clip(ms[k].comment) + "'"); } }
+                }
+                if (on("expr")) {
+                    eachProp(L, function (pr) {
+                        var ex = "";
+                        try { ex = pr.canSetExpression ? pr.expression : ""; } catch (e1) { }
+                        if (ex !== "" && hit(ex)) { out.push("expr   " + tag + " " + A.propPath(pr) + ": " + clip(String(ex).replace(/\r\n|\r|\n/g, " ⏎ "))); }
+                    });
+                }
+            }
+        }
+        out.push(out.length ? out.length + " match(es)" : "no matches");
+        return out.join("\n");
+    };
+
+    // ------------------------------------------------------------------ diff snapshot / graph data
+    // Whole-project state for `ae run --diff`: items, then per comp "@C id header" and per layer "@L key" + its dump
+    // lines (keys, expressions and changed static values).
+    A._snapshot = function () {
+        var out = ["@I"], items = A.items(), comps, i, j;
+        for (i = 0; i < items.length; i++) {
+            var it = items[i];
+            out.push(it.typeName + " '" + it.name + "' id=" + it.id + (A.itemPath(it) ? " folder='" + A.itemPath(it) + "'" : ""));
+        }
+        comps = A.comps();
+        for (i = 0; i < comps.length; i++) {
+            var c = comps[i];
+            out.push("@C " + c.id + " " + compHeader(c));
+            var cm = A.markers(c);
+            for (j = 0; j < cm.length; j++) { out.push("marker f" + num(cm[j].frame) + " " + markerText(cm[j])); }
+            for (j = 1; j <= c.numLayers; j++) {
+                var L = c.layer(j), key;
+                try { key = "id" + L.id; } catch (e) { key = "name " + L.name; }
+                if (key === "idundefined") { key = "name " + L.name; }
+                out.push("@L " + key);
+                out = out.concat(dumpLayer(L, { maxKeys: 100000, props: true }, ""));
+            }
+        }
+        return out.join("\n");
+    };
+    A._snapshotTo = function (path) {
+        app.beginSuppressDialogs();
+        try { A.writeText(path, A._snapshot()); } catch (e) { A.warn("diff snapshot failed: " + e.message); }
+        try { app.endSuppressDialogs(false); } catch (e1) { }
+    };
+    // Samples of a numeric property for `ae graph`: header, keys, then "S frame value" every `step` frames
+    // (post-expression). Range: fromF..toF, default the keys +-5 frames (or the layer) inside the comp.
+    A.graphData = function (p, fromF, toF, step) {
+        var T = PropertyValueType, vt = p.propertyValueType;
+        var spatial = vt === T.TwoD_SPATIAL || vt === T.ThreeD_SPATIAL;
+        if (!(spatial || vt === T.OneD || vt === T.TwoD || vt === T.ThreeD || vt === T.COLOR)) { throw new Error(A.propPath(p) + " is not a numeric property"); }
+        var L = A.layerOf(p), c = L.containingComp, fd = c.frameDuration, maxF = Math.round(c.duration / fd);
+        var a = p.numKeys > 0 ? p.keyTime(1) / fd - 5 : L.inPoint / fd, b = p.numKeys > 0 ? p.keyTime(p.numKeys) / fd + 5 : L.outPoint / fd;
+        if (fromF === undefined || fromF === null) { fromF = Math.max(0, Math.floor(a)); }
+        if (toF === undefined || toF === null) { toF = Math.min(maxF, Math.ceil(b)); }
+        step = step || 0.5;
+        if (toF <= fromF) { throw new Error("graph: empty range f" + fromF + "..f" + toF); }
+        if ((toF - fromF) / step > 4000) { step = (toF - fromF) / 4000; }
+        var out = ["PROP '" + L.name + "' " + A.propPath(p) + " (" + p.matchName + ") fps=" + num(c.frameRate) + " spatial=" + (spatial ? 1 : 0) + " color=" + (vt === T.COLOR ? 1 : 0)];
+        out.push("RANGE " + num(fromF) + " " + num(toF) + " " + num(step));
+        for (var k = 1; k <= p.numKeys; k++) { out.push("KEY " + keyText(p, k, fd)); }
+        for (var i = 0; fromF + i * step <= toF + 1e-9; i++) {
+            var f = fromF + i * step, v = p.valueAtTime(f * fd, false), vs = [];
+            if (v instanceof Array) { for (var d = 0; d < v.length; d++) { vs.push(num(v[d])); } } else { vs.push(num(v)); }
+            out.push("S " + num(f) + " " + vs.join(","));
         }
         return out.join("\n");
     };

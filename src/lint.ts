@@ -11,6 +11,8 @@
 //     `let` / `yield` as plain names, labels, debugger, Date.now.
 //   undefined at runtime: JSON, Function.prototype.bind, Object.keys & co, Array.isArray, [].indexOf/forEach/map...,
 //     "".trim & co.
+// Expression strings (AE.expr(p, "...") and p.expression = "...") are parsed as modern JavaScript: a syntax error
+// there compiles as ExtendScript but fails when AE evaluates the expression (it does not throw, pitfall 16): a warning.
 import * as acorn from "acorn";
 import * as walk from "acorn-walk";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -220,6 +222,7 @@ export function lint(src: string, libPath?: string): Finding[] {
         if (n.operator === "??") at(n, "error", "?? (ES2020): use (x !== undefined && x !== null ? x : y)");
         return;
       case "AssignmentExpression":
+        if (n.operator === "=" && n.left.type === "MemberExpression" && !n.left.computed && n.left.property.name === "expression") exprRule(n.right);
         if (n.operator === "**=") at(n, "error", "**= (ES2016): use x = Math.pow(x, y)");
         else if (n.operator === "??=" || n.operator === "||=" || n.operator === "&&=") at(n, "error", n.operator + " (ES2021): write the assignment out");
         return;
@@ -269,11 +272,23 @@ export function lint(src: string, libPath?: string): Finding[] {
     }
   }
 
+  // an expression string with a syntax error still compiles as ExtendScript but fails in AE: a warning
+  function exprRule(arg: Node | undefined) {
+    if (!arg || arg.type !== "Literal" || typeof arg.value !== "string" || arg.value === "") return;
+    try {
+      acorn.parse(arg.value, { ecmaVersion: "latest", sourceType: "script", allowReturnOutsideFunction: true });
+    } catch (e) {
+      const se = e as SyntaxError & { loc?: { line: number } };
+      at(arg, "warning", `expression syntax error: ${String(se.message).replace(/\s*\(\d+:\d+\)$/, "")} (line ${se.loc?.line ?? 1} of the expression)`);
+    }
+  }
+
   function callRules(n: Node) {
     const c = n.callee;
     if (c.type !== "MemberExpression" || c.computed || c.property.type !== "Identifier") return;
     const prop: string = c.property.name;
     const obj = c.object;
+    if (obj.type === "Identifier" && obj.name === "AE" && prop === "expr") exprRule(n.arguments[1]);
     if (prop === "executeCommand") return at(n, "error", "app.executeCommand is forbidden: menu commands can open dialogs and act on whatever is selected (pitfall 2)");
     const isAE = obj.type === "Identifier" && (obj.name === "AE" || obj.name === "A");
     if (!isAE && Object.prototype.hasOwnProperty.call(ES5_METHODS, prop) && !assignedProto.has(prop)) {
