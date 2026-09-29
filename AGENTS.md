@@ -9,7 +9,7 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 | path | what |
 |---|---|
 | `src/` | the CLI in TypeScript: `cli.ts` (dispatch, usage text), `commands/*.ts`, `lint.ts` (ExtendScript lint), `runner.ts` (osascript, logs, PNG waits), `media.ts` (ffmpeg, image measuring), `audio.ts` (onset detection for `ae beats`), `diff.ts` (`run --diff`), `plot.ts` (`graph` charts, own PNG encoder), `mcp.ts` (`ae mcp`) |
-| `dist/ae.mjs` | the bundled CLI, **generated** by `npm run build` and committed (the plugin installs from git without a build step). Never edit it by hand |
+| `dist/ae.mjs` | the bundled CLI, **generated** by `pnpm build` and committed (the plugin installs from git without a build step). Never edit it by hand |
 | `ae` | launcher: checks the node version, then loads `dist/ae.mjs`. Plain old JS on purpose |
 | `lib.jsx` | ExtendScript library, everything under `AE`. `ae run` prepends it to every script |
 | `test/*.test.ts` | vitest suite: lint rules, CLI exit codes and messages, the hook |
@@ -57,11 +57,11 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 Without AE (fast, run them always):
 
 ```sh
-npm install
-npm run check        # typecheck + build + vitest + fails if the committed dist/ is stale
+pnpm install
+pnpm check           # typecheck + build + vitest + fails if the committed dist/ is stale
 zsh -n completions/_ae
 ./ae doctor          # AE-related lines only WARN when AE is not running
-npm pack --dry-run   # the file list must include everything the CLI reads at runtime
+pnpm pack --dry-run  # the file list must include everything the CLI reads at runtime
 claude plugin validate .
 ```
 
@@ -86,4 +86,4 @@ save the project from a test.
 
 1. Bump `version` in both `package.json` and `.claude-plugin/plugin.json` (keep them equal).
 2. Run the checks above, including `ae selftest` against a running AE, and commit the rebuilt `dist/`.
-3. `npm publish`, and push to `main`. The plugin marketplace installs straight from the GitHub repo.
+3. `pnpm publish`, and push to `main`. The plugin marketplace installs straight from the GitHub repo.

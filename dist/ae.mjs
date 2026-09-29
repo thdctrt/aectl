@@ -1,4 +1,4 @@
-// Generated from src/ by npm run build. Do not edit.
+// Generated from src/ by pnpm build. Do not edit.
 
 // src/util.ts
 import { spawnSync } from "node:child_process";

@@ -154,7 +154,7 @@ macOS ask whether Claude may control After Effects: allow it (System Settings > 
 
 ## Development
 
-The CLI is TypeScript in `src/`, bundled into `dist/ae.mjs`. `npm install && npm run check` type-checks, runs the
+The CLI is TypeScript in `src/`, bundled into `dist/ae.mjs`. `pnpm install && pnpm check` type-checks, runs the
 tests (vitest) and verifies that the committed `dist/` is up to date. See [AGENTS.md](AGENTS.md).
 
 ## License

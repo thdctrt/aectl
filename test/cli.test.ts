@@ -1,5 +1,5 @@
 // End-to-end tests of the built CLI (dist/ae.mjs through the `ae` launcher) for everything that does not need AE.
-// `npm test` builds first.
+// `pnpm test` builds first.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";

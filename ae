@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// ae / aectl: drive Adobe After Effects from the shell. The CLI is dist/ae.mjs, built from src/ (npm run build).
+// ae / aectl: drive Adobe After Effects from the shell. The CLI is dist/ae.mjs, built from src/ (pnpm build).
 // This file stays plain old JavaScript so an old node prints a clear message instead of a syntax error.
 var major = Number(process.versions.node.split(".")[0]);
 if (major < 22) {
