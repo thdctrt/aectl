@@ -133,6 +133,9 @@ describe("ae export arguments", () => {
     [["export", "Main", "--full", "--from", "1"], "--full and --from/--to exclude each other"],
     [["export", "Main", "--from", "x"], "--from must be a comp frame number"],
     [["export", "Main", "--wait"], "--wait only goes with --ame"],
+    [["export", "Main", "--quick", "--ame"], "--quick and --ame exclude each other"],
+    [["export", "Main", "--res", "half"], "--res only goes with --quick"],
+    [["export", "Main", "--quick", "--res", "huge"], "--res must be full|half|third|quarter"],
   ])("ae %j -> exit 2", (args, msg) => {
     const r = ae(args);
     expect(r.code).toBe(2);

@@ -11,6 +11,8 @@ import { parseEffects, searchEffects } from "../src/commands/project.ts";
 import { diffSnapshots, lineDiff, parseSnapshot } from "../src/diff.ts";
 import { TOOLS_LIST } from "../src/mcp.ts";
 import { encodePng, renderChart } from "../src/plot.ts";
+import { makeSheet } from "../src/media.ts";
+import { spawnSync } from "node:child_process";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const tmp = () => mkdtempSync(path.join(os.tmpdir(), "aectl-"));
@@ -97,6 +99,23 @@ describe("graph", () => {
     const idat = png.indexOf("IDAT");
     const raw = inflateSync(png.subarray(idat + 4, idat + 4 + png.readUInt32BE(idat - 4)));
     expect([...raw]).toEqual([0, 255, 0, 0, 0, 255, 0, 0, 0, 0, 255, 9, 9, 9]);
+  });
+});
+
+describe("sheets", () => {
+  it("put transparent frames on an opaque checkerboard", () => {
+    const d = tmp();
+    const png = path.join(d, "clear.png");
+    // a fully transparent frame with a white box: white on white would vanish
+    expect(spawnSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=c=black@0:s=160x90,format=rgba,drawbox=x=40:y=30:w=80:h=30:color=white:t=fill", "-frames:v", "1", png]).status).toBe(0);
+    const sheet = path.join(d, "sheet.png");
+    makeSheet(sheet, 2, 160, [{ label: "a", file: png }, { label: "b", file: png }]);
+    const px = spawnSync("ffmpeg", ["-v", "error", "-i", sheet, "-vf", "crop=1:1:5:80,format=rgba", "-f", "rawvideo", "-"]);
+    const [r, g, b, a] = [...px.stdout];
+    expect(a).toBe(255);
+    expect(r).toBe(g);
+    expect(r === 150 || r === 102).toBe(true);
+    expect(b).toBe(r);
   });
 });
 

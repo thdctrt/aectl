@@ -149,11 +149,13 @@ function fft(re, im) {
     }
   }
 }
-function onsets(input, o = {}) {
+function padded(input) {
   const x = new Float32Array(input.length + N);
   x.set(input, N);
+  return x;
+}
+function novelty(x) {
   const frames = Math.max(0, Math.floor((x.length - N) / HOP) + 1);
-  if (frames < 3) return [];
   const win = new Float64Array(N);
   for (let i2 = 0; i2 < N; i2++) win[i2] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i2 / N);
   const re = new Float64Array(N), im = new Float64Array(N);
@@ -181,6 +183,13 @@ function onsets(input, o = {}) {
     while (lo < f - w) acc -= flux[lo++];
     nov[f] = Math.max(0, flux[f] - acc / (hi - lo + 1));
   }
+  return nov;
+}
+function onsets(input, o = {}) {
+  const x = padded(input);
+  const nov = novelty(x);
+  const frames = nov.length;
+  if (frames < 3) return [];
   let max = 0;
   for (const v of nov) max = Math.max(max, v);
   if (max <= 0) return [];
@@ -225,6 +234,45 @@ function loudness(x, step) {
     out2.push(10 * Math.log10(s2 / Math.max(1, end - i2) + 1e-12));
   }
   return out2;
+}
+function tempo(input) {
+  const raw = novelty(padded(input));
+  const nov = new Float64Array(raw.length);
+  for (let i2 = 0; i2 < raw.length; i2++) {
+    let s2 = 0;
+    for (let k = -4; k <= 4; k++) s2 += (raw[i2 + k] ?? 0) * (5 - Math.abs(k));
+    nov[i2] = s2 / 25;
+  }
+  const step = HOP / SR;
+  const minLag = Math.floor(60 / 200 / step);
+  const maxLag = Math.ceil(60 / 60 / step);
+  if (nov.length < maxLag * 2.2) return NaN;
+  let mean = 0;
+  for (const v of nov) mean += v;
+  mean /= nov.length;
+  const ac = new Float64Array(maxLag + 2);
+  for (let lag2 = minLag - 1; lag2 <= maxLag + 1; lag2++) {
+    let s2 = 0;
+    for (let i2 = 0; i2 + lag2 < nov.length; i2++) s2 += (nov[i2] - mean) * (nov[i2 + lag2] - mean);
+    ac[lag2] = s2 / (nov.length - lag2);
+  }
+  let best = -Infinity;
+  let bestLag = 0;
+  for (let lag2 = minLag; lag2 <= maxLag; lag2++) {
+    const bpm = 60 / (lag2 * step);
+    const v = ac[lag2] * (bpm >= 80 && bpm <= 160 ? 1 : 0.85);
+    if (v > best) {
+      best = v;
+      bestLag = lag2;
+    }
+  }
+  if (!bestLag || best <= 0) return NaN;
+  const a = ac[bestLag - 1];
+  const b = ac[bestLag];
+  const c = ac[bestLag + 1];
+  const d = a - 2 * b + c;
+  const lag = bestLag + (d < 0 ? 0.5 * (a - c) / d : 0);
+  return Math.round(600 / (lag * step)) / 10;
 }
 
 // src/runner.ts
@@ -6810,7 +6858,8 @@ function analyse(pl, o) {
   for (const h of hits) h.strength = max > 0 ? h.strength / max : 0;
   const body = x.subarray(Math.round(pre * SR));
   const env = o.env ? loudness(body, 1 / pl.fps / pl.stretch).map((db, i2) => ({ frame: Math.round(toFrame(i2 / pl.fps / pl.stretch)), db })) : [];
-  return { from, to, hits, env };
+  const bpm = tempo(x) / pl.stretch;
+  return { from, to, hits, env, bpm: isNaN(bpm) ? NaN : Math.round(bpm * 10) / 10 };
 }
 async function cmdBeats(argv) {
   const p = parseArgs(argv, "beats", ["--layer", "--from", "--to", "--fps", "--offset", "--top", "--min-gap", "--threshold", "--label"], ["--env", "--mark"]);
@@ -6858,6 +6907,7 @@ log("PLACE " + [c.frameRate, L.startTime, L.stretch, L.inPoint, L.outPoint, L.ti
   const top = opt2("--top");
   if (top !== void 0) hits = [...hits].sort((a, b) => b.strength - a.strength).slice(0, top).sort((a, b) => a.frame - b.frame);
   err(`ae: ${hits.length} onsets, ${where}, ${res.from}..${res.to}; strength 0..1 (1 = strongest here)`);
+  if (!isNaN(res.bpm)) err(`ae: tempo ~${res.bpm} BPM, a beat every ${+(60 / res.bpm * pl.fps).toFixed(2)} frames (could also be half or double)`);
   for (const h of hits) out(`${String(h.frame).padStart(6)}  ${h.strength.toFixed(2)}  ${"#".repeat(Math.max(1, Math.round(h.strength * 20)))}`);
   if (p.opts["--env"]) {
     const max = Math.max(...res.env.map((e) => e.db));
@@ -6879,7 +6929,7 @@ log(__f.length + " beat marker(s) on '" + __L.name + "'");
 }
 
 // src/commands/export.ts
-import { readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, readdirSync as readdirSync2, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import path6 from "node:path";
 
 // src/media.ts
@@ -6903,15 +6953,20 @@ function makeSheet(outFile, cols, cellWidth, cells) {
   const filters = [];
   const layout = [];
   let stack = "";
+  const sq = Math.max(8, Math.round(cellWidth / 48));
+  const g = (v) => `'if(mod(floor(X/${sq})+floor(Y/${sq}),2),${v},${v - 48})'`;
+  const bgs = cells.map((_, i2) => `[bg${i2}]`).join("");
+  filters.push(`color=c=gray:s=${cellWidth}x${ch}:d=1,format=rgb24,geq=r=${g(150)}:g=${g(150)}:b=${g(150)}${cells.length > 1 ? `,split=${cells.length}` : ""}${bgs}`);
   cells.forEach((c, i2) => {
     inputs.push("-i", c.file);
     const dt = font2 ? `,drawtext=fontfile='${font2}':text='${safeLabel(c.label)}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=5` : "";
-    filters.push(`[${i2}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,pad=${cellWidth}:${ch}:(ow-iw)/2:(oh-ih)/2:color=black${dt}[v${i2}]`);
+    filters.push(`[${i2}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,format=rgba[s${i2}]`);
+    filters.push(`[bg${i2}][s${i2}]overlay=(W-w)/2:(H-h)/2:format=auto,format=rgb24${dt}[v${i2}]`);
     layout.push(`${i2 % cols * cellWidth}_${Math.floor(i2 / cols) * ch}`);
     stack += `[v${i2}]`;
   });
   let fc;
-  if (cells.length === 1) fc = filters[0].replace(/\[v0\]$/, "[out]");
+  if (cells.length === 1) fc = filters.join(";").replace(/\[v0\]$/, "[out]");
   else fc = filters.join(";") + `;${stack}xstack=inputs=${cells.length}:layout=${layout.join("|")}:fill=black[out]`;
   mkdirSync2(path5.dirname(outFile), { recursive: true });
   const r = run("ffmpeg", ["-v", "error", "-y", ...inputs, "-filter_complex", fc, "-map", "[out]", "-frames:v", "1", "-update", "1", outFile], { stdio: ["ignore", "inherit", "inherit"] });
@@ -7104,10 +7159,10 @@ function ffmpegArgs(p, input, output, o) {
 }
 
 // src/commands/export.ts
-var USAGE2 = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--ame [--wait]]   (presets: ae export --list)';
+var USAGE2 = 'usage: ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--keep-intermediate] [--timeout s] [--quick [--res full|half|third|quarter]] [--ame [--wait]]   (presets: ae export --list)';
 var RENDER_TIMEOUT = 3600;
 async function cmdExport(argv) {
-  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list"]);
+  const p = parseArgs(argv, "export", ["--preset", "--out", "--from", "--to", "--fit", "--timeout", "--res"], ["--full", "--force", "--keep-intermediate", "--ame", "--wait", "--list", "--quick"]);
   if (p.opts["--list"]) {
     out(listPresets());
     return 0;
@@ -7122,6 +7177,10 @@ async function cmdExport(argv) {
   const to = frameOpt(p.opts["--to"], "--to");
   if (p.opts["--full"] && (from !== void 0 || to !== void 0)) die("--full and --from/--to exclude each other");
   if (p.opts["--wait"] && !p.opts["--ame"]) die("--wait only goes with --ame");
+  if (p.opts["--quick"] && p.opts["--ame"]) die("--quick and --ame exclude each other");
+  if (p.opts["--res"] && !p.opts["--quick"]) die("--res only goes with --quick (a render-queue export is always full size)");
+  const res = str(p, "--res", "full");
+  if (!["full", "half", "third", "quarter"].includes(res)) die("--res must be full|half|third|quarter");
   const timeout = p.opts["--timeout"] ? Number(p.opts["--timeout"]) : RENDER_TIMEOUT;
   if (!(timeout > 0)) die("--timeout must be a number of seconds");
   const safe = comp.replace(/[^\p{L}\p{N}_-]+/gu, "_");
@@ -7133,8 +7192,14 @@ async function cmdExport(argv) {
   need("ffmpeg");
   need("ffprobe");
   const master = path6.join(WORK, "export", `${safe}_${preset.name}_master.mov`);
-  err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
-  const rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  let rendered;
+  if (p.opts["--quick"]) {
+    err(`ae: snapping '${comp}' frame by frame (quick: no render queue, no audio)...`);
+    rendered = await snapMaster(comp, master, span, res, p.opts["--timeout"] ? timeout : void 0);
+  } else {
+    err(`ae: rendering '${comp}' in After Effects (AE is busy until the render finishes)...`);
+    rendered = await renderInAe(comp, master, { kind: preset.alpha ? "alpha" : "master", ...span }, timeout);
+  }
   if (typeof rendered === "number") return rendered;
   err(`ae: encoding ${preset.name}...`);
   const code = encode(preset, rendered, target, fit, true);
@@ -7173,6 +7238,42 @@ async function renderInAe(comp, file, o, timeout) {
     return 1;
   }
   return written;
+}
+async function snapMaster(comp, file, span, res, timeout) {
+  const dir = path6.join(WORK, "export", "quick");
+  mkdirSync3(dir, { recursive: true });
+  for (const f of readdirSync2(dir)) if (/^q_f\d+\.png$/.test(f)) rmSync2(path6.join(dir, f), { force: true });
+  const range = span.from !== void 0 || span.to !== void 0 ? `a = ${span.from ?? 0}; b = ${span.to === void 0 ? "Math.round(c.duration / fd) - 1" : span.to};` : span.full ? "a = 0; b = Math.round(c.duration / fd) - 1;" : "a = Math.round(c.workAreaStart / fd); b = Math.round((c.workAreaStart + c.workAreaDuration) / fd) - 1;";
+  const code = `var c = AE.comp(${jsstr(comp)}), fd = c.frameDuration, a, b, fr = [];
+${range}
+if (b < a) { throw new Error("export: empty frame range " + a + ".." + b); }
+if (b - a > 3000) { throw new Error("export --quick: " + (b - a + 1) + " frames is too many; use the render queue (no --quick)"); }
+for (var f = a; f <= b; f++) { fr.push(f); }
+log("FPS " + c.frameRate);
+AE.snap(c, fr, ${jsstr(dir)}, "q", ${jsstr(res)});
+`;
+  const r = await runSnippet("export", "quick", code, { undo: false, label: "ae export", quiet: true, snapTimeout: timeout ?? Math.max(SNAP_TIMEOUT, 600) });
+  if (r.code) return r.code;
+  const log = readLog(r.log).split("\n");
+  const pngs = log.filter((l) => l.startsWith("PNG ")).map((l) => l.slice(4));
+  const fps = Number(log.find((l) => l.startsWith("FPS "))?.slice(4));
+  if (!pngs.length || !(fps > 0)) {
+    err(`ae: no frames came back (log: ${r.log})`);
+    return 1;
+  }
+  const list2 = path6.join(dir, "list.txt");
+  const q = (f) => "file '" + f.replace(/'/g, "'\\''") + "'";
+  writeFileSync3(list2, "ffconcat version 1.0\n" + pngs.map((f) => `${q(f)}
+duration ${(1 / fps).toFixed(6)}
+`).join(""));
+  const m = run("ffmpeg", ["-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", list2, "-frames:v", String(pngs.length), "-r", String(fps), "-c:v", "png", "-pix_fmt", "rgba", file], { stdio: ["ignore", "inherit", "inherit"] });
+  for (const f of pngs) rmSync2(f, { force: true });
+  if (m.status !== 0 || !isFile(file)) {
+    err(`ae: ffmpeg could not join the ${pngs.length} frames`);
+    return 1;
+  }
+  err(`ae: ${pngs.length} frames at ${+fps.toFixed(3)} fps`);
+  return file;
 }
 function encode(preset, input, output, fit, stats = false) {
   const v = probeVideo(input);
@@ -7244,11 +7345,11 @@ async function exportWithAme(comp, preset, target, span, timeout, wait) {
 }
 
 // src/commands/inspect.ts
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync3, renameSync } from "node:fs";
+import { mkdirSync as mkdirSync5, readFileSync as readFileSync3, renameSync } from "node:fs";
 import path8 from "node:path";
 
 // src/commands/media.ts
-import { mkdirSync as mkdirSync3, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
+import { mkdirSync as mkdirSync4, readdirSync as readdirSync3, rmSync as rmSync3 } from "node:fs";
 import path7 from "node:path";
 async function cmdSheet(argv) {
   const p = parseArgs(argv, "sheet", ["--cols", "--width"]);
@@ -7291,7 +7392,7 @@ async function cmdFrames(argv) {
   const fps = rate(v.avgFrameRate);
   const base2 = basenameNoExt(vid).replace(/[^A-Za-z0-9_-]/g, "_");
   const dir = path7.join(WORK, "frames", base2);
-  mkdirSync3(dir, { recursive: true });
+  mkdirSync4(dir, { recursive: true });
   for (const f of readdirSync3(dir)) if (/^cell_.*\.png$/.test(f)) rmSync3(path7.join(dir, f), { force: true });
   const sheet = abspath(str(p, "--out") || path7.join(WORK, "frames", base2 + "_sheet.png"));
   const cells = [];
@@ -7383,7 +7484,7 @@ function parseFrames(spec) {
 }
 var RES = ["full", "half", "third", "quarter"];
 async function snapFrames(comp, frames, dir, prefix, res, crop, snapTimeout) {
-  mkdirSync4(dir, { recursive: true });
+  mkdirSync5(dir, { recursive: true });
   const code = `var c = AE.comp(${jsstr(comp)});
 log("SIZE " + c.width);
 AE.snap(c, [${frames.join(",")}], ${jsstr(dir)}, ${jsstr(prefix)}, ${jsstr(res)});
@@ -7411,7 +7512,7 @@ async function cmdSnap(argv) {
   if (!RES.includes(res)) die("--res must be full|half|third|quarter");
   const frames = parseFrames(spec);
   const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = abspath(str(p, "--out") || path8.join(WORK, "snap", prefix));
+  const dir = abspath(str(p, "--out") || path8.join(WORK, "snap", comp.replace(/[^A-Za-z0-9_-]/g, "_")));
   const r = await snapFrames(comp, frames, dir, prefix, res, crop, p.opts["--timeout"] ? Number(p.opts["--timeout"]) : void 0);
   if (r.code) return r.code;
   for (const c of r.cells) out(c.file);
@@ -7432,7 +7533,7 @@ function cropPng(file, region, compW) {
 }
 
 // src/commands/save.ts
-import { copyFileSync, mkdirSync as mkdirSync5, statSync as statSync4, utimesSync } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync6, statSync as statSync4, utimesSync } from "node:fs";
 import path9 from "node:path";
 var logValue = (log, key) => (readLog(log).split("\n").find((l) => l.startsWith(key + " ")) ?? "").slice(key.length + 1);
 async function cmdSave(argv) {
@@ -7466,7 +7567,7 @@ async function cmdSave(argv) {
     const ext = path9.extname(name);
     const dest = path9.join(path9.dirname(project), "Backups", `${name.slice(0, name.length - ext.length)}-${stamp(/* @__PURE__ */ new Date())}${ext}`);
     try {
-      mkdirSync5(path9.dirname(dest), { recursive: true });
+      mkdirSync6(path9.dirname(dest), { recursive: true });
       copyFileSync(project, dest);
       const s3 = statSync4(project);
       utimesSync(dest, s3.atime, s3.mtime);
@@ -7503,7 +7604,7 @@ function humanSize(n) {
 }
 
 // src/commands/script.ts
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync7, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import path10 from "node:path";
 
 // src/diff.ts
@@ -7633,7 +7734,7 @@ async function cmdRun(argv) {
   }
   const diffDir = path10.join(WORK, "diff");
   const diff = p.opts["--diff"] ? { before: path10.join(diffDir, "before.txt"), after: path10.join(diffDir, "after.txt") } : void 0;
-  if (diff) mkdirSync6(diffDir, { recursive: true });
+  if (diff) mkdirSync7(diffDir, { recursive: true });
   const code = await runJsx(script, log, { undo, label: path10.basename(script), timeout, rollback: !p.opts["--no-rollback"], exprCheck: !p.opts["--ro"], diff });
   if (diff && (code === 0 || code === 1) && isFile(diff.before) && isFile(diff.after)) {
     const lines = diffSnapshots(parseSnapshot(readFileSync4(diff.before, "utf8")), parseSnapshot(readFileSync4(diff.after, "utf8")));
@@ -7659,14 +7760,14 @@ async function cmdEval(argv) {
   const code = argv.filter((a) => a !== "--ro" && a !== "--no-rollback").join("\n");
   if (!code) die("usage: ae eval 'js code' [--ro] [--no-rollback]   (the value of the last expression is logged)");
   const dir = path10.join(WORK, "eval");
-  mkdirSync6(dir, { recursive: true });
+  mkdirSync7(dir, { recursive: true });
   const f = path10.join(dir, "eval.jsx");
-  writeFileSync3(f, evalScript(code));
+  writeFileSync4(f, evalScript(code));
   return runJsx(f, path10.join(dir, "eval.log"), { undo, label: "ae eval", rollback, exprCheck: undo });
 }
 async function cmdCheck(argv) {
   if (!argv.length) die("usage: ae check script.jsx [more.jsx ...]");
-  mkdirSync6(path10.join(WORK, "run"), { recursive: true });
+  mkdirSync7(path10.join(WORK, "run"), { recursive: true });
   let code = 0;
   for (const f of argv) {
     if (!isFile(f)) {
@@ -7682,7 +7783,7 @@ async function cmdCheck(argv) {
 }
 
 // src/commands/setup.ts
-import { mkdirSync as mkdirSync7, readdirSync as readdirSync4, readFileSync as readFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync8, readdirSync as readdirSync4, readFileSync as readFileSync5 } from "node:fs";
 import os from "node:os";
 import path11 from "node:path";
 async function cmdDoctor() {
@@ -7703,7 +7804,7 @@ async function cmdDoctor() {
     else warn(`${tool} not found (needed by snap --sheet, sheet, frames, probe, selftest): brew install ffmpeg`);
   }
   try {
-    mkdirSync7(WORK, { recursive: true });
+    mkdirSync8(WORK, { recursive: true });
     ok("work dir " + WORK);
   } catch {
     fail(`cannot write the work dir ${WORK} (set AE_TMP)`);
@@ -7783,7 +7884,7 @@ async function cmdSelftest(argv) {
     return 3;
   }
   need("ffmpeg");
-  mkdirSync7(path11.join(WORK, "logs"), { recursive: true });
+  mkdirSync8(path11.join(WORK, "logs"), { recursive: true });
   const clip = path11.join(WORK, "__aetools_clip.mp4");
   if (!isFile(clip)) {
     const src = ["-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=6"];
@@ -7873,7 +7974,7 @@ async function cmdHook() {
 import path13 from "node:path";
 
 // src/plot.ts
-import { mkdirSync as mkdirSync8, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync9, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import path12 from "node:path";
 import { deflateSync } from "node:zlib";
 var BG = [24, 24, 24];
@@ -8008,15 +8109,15 @@ function renderChart(file, ch) {
   for (const m of ch.marks) if (m >= ch.xFrom && m <= ch.xTo) labels.push({ x: X(m) - 12, y: bottom + 8, text: "f" + fmt(m), color: "0xd8c870", size: 12 });
   labels.push({ x: L, y: H - 14, text: "f" + fmt(ch.xFrom), color: "0xaaaaaa", size: 11 });
   labels.push({ x: R - 40, y: H - 14, text: "f" + fmt(ch.xTo), color: "0xaaaaaa", size: 11 });
-  mkdirSync8(path12.dirname(file), { recursive: true });
+  mkdirSync9(path12.dirname(file), { recursive: true });
   const png = encodePng(W, H, r.data);
   const font2 = labelFont();
   if (!font2 || !has("ffmpeg")) {
-    writeFileSync4(file, png);
+    writeFileSync5(file, png);
     return false;
   }
   const plain = file.replace(/\.png$/i, "") + ".plain.png";
-  writeFileSync4(plain, png);
+  writeFileSync5(plain, png);
   const safe = (s2) => s2.replace(/[^A-Za-z0-9 ._#=+/()-]/g, "_");
   const vf = labels.map((l) => `drawtext=fontfile='${font2}':text='${safe(l.text)}':x=${Math.round(l.x)}:y=${Math.round(l.y)}:fontsize=${l.size}:fontcolor=${l.color}`).join(",");
   const res = run("ffmpeg", ["-v", "error", "-y", "-i", plain, "-vf", vf, "-frames:v", "1", "-update", "1", file]);
@@ -8144,7 +8245,7 @@ log(AE.graphData(__p, ${opt2("--from")}, ${opt2("--to")}, ${opt2("--step")}));
 }
 
 // src/commands/project.ts
-import { mkdirSync as mkdirSync9, readFileSync as readFileSync6, writeFileSync as writeFileSync5 } from "node:fs";
+import { mkdirSync as mkdirSync10, readFileSync as readFileSync6, writeFileSync as writeFileSync6 } from "node:fs";
 import path14 from "node:path";
 var compExpr = (name) => `AE.comp(${name ? jsstr(name) : "null"})`;
 async function cmdSel(argv) {
@@ -8216,8 +8317,8 @@ async function loadEffects(refresh) {
   const r = await runSnippet("effects", "effects", code, { undo: false, label: "ae effects", quiet: true });
   if (r.code) return r.code;
   const text = readLog(r.log);
-  mkdirSync9(WORK, { recursive: true });
-  writeFileSync5(EFFECTS_CACHE, text);
+  mkdirSync10(WORK, { recursive: true });
+  writeFileSync6(EFFECTS_CACHE, text);
   return parseEffects(text);
 }
 function parseEffects(text) {
@@ -8248,7 +8349,7 @@ async function cmdEffects(argv) {
 
 // src/mcp.ts
 import { spawn } from "node:child_process";
-import { mkdirSync as mkdirSync10, readFileSync as readFileSync7, statSync as statSync5, writeFileSync as writeFileSync6 } from "node:fs";
+import { mkdirSync as mkdirSync11, readFileSync as readFileSync7, statSync as statSync5, writeFileSync as writeFileSync7 } from "node:fs";
 import path15 from "node:path";
 import { createInterface } from "node:readline";
 var VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -8265,9 +8366,9 @@ var prefixed = (prefix) => (lines) => lines.filter((l) => l.startsWith(prefix)).
 var pngLines = (lines) => lines.filter((l) => l.endsWith(".png") && path15.isAbsolute(l));
 function scriptFile(code, name, dflt) {
   const dir = path15.join(WORK, "mcp");
-  mkdirSync10(dir, { recursive: true });
+  mkdirSync11(dir, { recursive: true });
   const f = path15.join(dir, (s(name).replace(/[^A-Za-z0-9_-]+/g, "_") || dflt) + ".jsx");
-  writeFileSync6(f, code);
+  writeFileSync7(f, code);
   return f;
 }
 function docs() {
@@ -8480,10 +8581,24 @@ var TOOLS_LIST = [
       to: N2("last comp frame"),
       full: B("the whole comp instead of the work area"),
       fit: { type: "string", enum: ["pad", "crop"], description: "when the aspect differs: letterbox (default) or fill" },
-      force: B("overwrite an existing file")
+      force: B("overwrite an existing file"),
+      quick: B("take the frames with snap instead of the render queue: a fast preview, no audio"),
+      res: { type: "string", enum: ["full", "half", "third", "quarter"], description: "with quick: render resolution (default full)" }
     },
     required: ["comp"],
-    argv: (a) => ["export", s(a.comp), ...opt("--preset", a.preset), ...opt("--out", a.out), ...opt("--from", a.from), ...opt("--to", a.to), ...flag("--full", a.full), ...opt("--fit", a.fit), ...flag("--force", a.force)]
+    argv: (a) => [
+      "export",
+      s(a.comp),
+      ...opt("--preset", a.preset),
+      ...opt("--out", a.out),
+      ...opt("--from", a.from),
+      ...opt("--to", a.to),
+      ...flag("--full", a.full),
+      ...opt("--fit", a.fit),
+      ...flag("--force", a.force),
+      ...flag("--quick", a.quick),
+      ...a.quick ? opt("--res", a.res) : []
+    ]
   },
   {
     name: "ae_probe",
@@ -8658,6 +8773,7 @@ var USAGE3 = `ae - drive Adobe After Effects from the shell (macOS). See README.
   ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env] [--mark [--label N]]
   ae beats music.wav [--fps 25] [--offset F] [...]   accents (onsets) in comp frames; --env: loudness per frame
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+  ae export "Comp" --quick [--res half] [...]   frames via snap instead of the render queue: fast previews, no audio
   ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
   ae doctor                       check node/ffmpeg/AE/permissions/prefs      ae selftest [--keep]

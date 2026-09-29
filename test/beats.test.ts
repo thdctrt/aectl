@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { decodeMono, onsets } from "../src/audio.ts";
+import { decodeMono, onsets, tempo } from "../src/audio.ts";
 import { analyse } from "../src/commands/beats.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -28,6 +28,12 @@ describe("onsets", () => {
     t.forEach((v, i) => expect(Math.abs(v - i * 0.4)).toBeLessThan(0.005));
   });
 
+  it("estimates the tempo (a click every 0.4 s = 150 BPM), in comp time for a stretched layer", () => {
+    expect(Math.abs(tempo(decodeMono(clicks)) - 150)).toBeLessThan(1.5);
+    const res = analyse({ file: clicks, fps: 25, start: 1, stretch: 2, inF: 25, outF: 25 + 200 }, {});
+    expect(Math.abs(res.bpm - 75)).toBeLessThan(1);
+  });
+
   it("maps source time to comp frames through start and stretch", () => {
     const res = analyse({ file: clicks, fps: 25, start: 1, stretch: 2, inF: 25, outF: 25 + 200 }, {});
     expect(res.hits.map((h) => h.frame)).toEqual([25, 45, 65, 85, 105, 125, 145, 165, 185, 205]);
@@ -40,6 +46,7 @@ describe("ae beats file.wav", () => {
     expect(r.code).toBe(0);
     expect(frames(r.out)).toEqual([5, 15, 25, 35, 45, 55, 65, 75, 85, 95]);
     expect(r.err).toContain("10 onsets");
+    expect(r.err).toMatch(/tempo ~1(49|50|51)(\.\d)? BPM, a beat every 10(\.\d+)? frames/);
   });
 
   it("--from/--to limit the range, --top keeps the strongest (in frame order)", () => {

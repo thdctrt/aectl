@@ -182,6 +182,8 @@ _ae() {
         '--keep-intermediate[keep the master AE rendered]' \
         '--timeout[seconds to wait for the render]:seconds:' \
         '--ame[encode in Adobe Media Encoder]' \
+        '--quick[frames via snap instead of the render queue (no audio)]' \
+        '--res[with --quick: render resolution]:resolution:(full half third quarter)' \
         '--wait[with --ame: wait for the file]' \
         '--list[list the presets]' ;;
     save)

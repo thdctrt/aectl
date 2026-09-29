@@ -7,7 +7,11 @@ import { die, need, run } from "./util.ts";
 
 const safeLabel = (s: string) => s.replace(/[^A-Za-z0-9 ._#=+-]/g, "_");
 
-/** Tile images into one PNG, `cols` wide, each cell `cellWidth` px, labelled when a font is available. */
+/**
+ * Tile images into one PNG, `cols` wide, each cell `cellWidth` px, labelled when a font is available. Each image sits
+ * on a grey checkerboard, so transparent frames (AE snaps of comps without a background) stay readable: white text
+ * on a white sheet would vanish.
+ */
 export function makeSheet(outFile: string, cols: number, cellWidth: number, cells: { label: string; file: string }[]): void {
   need("ffmpeg");
   need("ffprobe");
@@ -24,15 +28,20 @@ export function makeSheet(outFile: string, cols: number, cellWidth: number, cell
   const filters: string[] = [];
   const layout: string[] = [];
   let stack = "";
+  const sq = Math.max(8, Math.round(cellWidth / 48)); // checker square
+  const g = (v: number) => `'if(mod(floor(X/${sq})+floor(Y/${sq}),2),${v},${v - 48})'`;
+  const bgs = cells.map((_, i) => `[bg${i}]`).join("");
+  filters.push(`color=c=gray:s=${cellWidth}x${ch}:d=1,format=rgb24,geq=r=${g(150)}:g=${g(150)}:b=${g(150)}${cells.length > 1 ? `,split=${cells.length}` : ""}${bgs}`);
   cells.forEach((c, i) => {
     inputs.push("-i", c.file);
     const dt = font ? `,drawtext=fontfile='${font}':text='${safeLabel(c.label)}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=5` : "";
-    filters.push(`[${i}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,pad=${cellWidth}:${ch}:(ow-iw)/2:(oh-ih)/2:color=black${dt}[v${i}]`);
+    filters.push(`[${i}:v]scale=${cellWidth}:${ch}:force_original_aspect_ratio=decrease,format=rgba[s${i}]`);
+    filters.push(`[bg${i}][s${i}]overlay=(W-w)/2:(H-h)/2:format=auto,format=rgb24${dt}[v${i}]`);
     layout.push(`${(i % cols) * cellWidth}_${Math.floor(i / cols) * ch}`);
     stack += `[v${i}]`;
   });
   let fc: string;
-  if (cells.length === 1) fc = filters[0].replace(/\[v0\]$/, "[out]");
+  if (cells.length === 1) fc = filters.join(";").replace(/\[v0\]$/, "[out]");
   else fc = filters.join(";") + ";" + `${stack}xstack=inputs=${cells.length}:layout=${layout.join("|")}:fill=black[out]`;
   mkdirSync(path.dirname(outFile), { recursive: true });
   const r = run("ffmpeg", ["-v", "error", "-y", ...inputs, "-filter_complex", fc, "-map", "[out]", "-frames:v", "1", "-update", "1", outFile], { stdio: ["ignore", "inherit", "inherit"] });

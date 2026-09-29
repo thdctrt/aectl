@@ -78,6 +78,7 @@ ae probe video.mp4 [--fps 25]                                # size, fps (avg + 
 ae beats "Main" --layer "Music" [--from F --to F] [--top N] [--env] [--mark]   # music accents in Main's frames (see below)
 ae beats music.wav [--fps 25] [--offset F] [...]                      # the same for a file that starts at frame F
 ae export "Main" [--preset youtube-1080] [--out f.mp4] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+ae export "Main" --preset gif --quick [--res half]           # frames via snap, not the render queue: previews, no audio
 ae export --list                                             # the presets (below)
 ae save [--status] [--backup] [--as file.aep]                # save the open project (see below)
 ae doctor                                                    # check node/ffmpeg/AE prefs/permissions, test the connection
@@ -87,6 +88,7 @@ ae mcp                                                       # the same tools as
 
 - `snap` defaults: `--res half`, output in `$TMPDIR/ae-tools/snap/<comp>/`, files named `<prefix>_f0044.png`. It prints one
   path per line, then `SHEET <path>` with `--sheet`. The comp's own resolution factor is restored afterwards.
+  `--prefix` only names the files. Sheets put transparent frames on a grey checkerboard (white text stays visible).
   `--crop x,y,w,h` is in comp pixels at any `--res` (a close-up of one region).
 - `measure`: "ink" is every pixel that is not background (alpha, or the corner colour). Compare a snap with a design
   render (`ae measure design.png snap.png`): b is scaled to a's size, so a half-res snap works; the delta says how
@@ -111,12 +113,15 @@ ae mcp                                                       # the same tools as
   the comp's own: key animation straight to them. `--top N` keeps the N strongest (downbeats, big hits),
   `--min-gap F` (default 3) merges closer ones, `--threshold` (default 0.15) drops weaker ones, `--env` adds loudness
   in dBFS per frame (swells, quiet parts). Time remapping on the layer is ignored (a note says so). `--mark` adds a
-  marker `beat <strength>` on the audio layer at each accent (one undo step; `--label` colours them).
+  marker `beat <strength>` on the audio layer at each accent (one undo step; `--label` colours them). A `tempo ~120
+  BPM, a beat every 12.5 frames` note goes to stderr when there is a clear pulse (it may be half or double the felt one).
 - The combined file that actually ran is at `$TMPDIR/ae-tools/run/<name>.combined.jsx`.
 - `export`: AE renders a master (ProRes 422 HQ or Lossless; with alpha for alpha presets) through the render queue,
   then ffmpeg encodes the preset. Default range: the comp's work area. Default file: `./<comp>_<preset>.<ext>`; an
   existing file needs `--force`. AE is busy until its render finishes. Prints `EXPORT <path>` and a probe line
-  (size, fps, length, codec, alpha, audio): check it matches what the user asked for. Map requests to presets:
+  (size, fps, length, codec, alpha, audio): check it matches what the user asked for. `--quick` takes the frames with
+  `saveFrameToPng` instead (the render queue is not touched, `--res half|quarter` for fast previews of heavy comps; no
+  audio, at most 3000 frames). Map requests to presets:
 
   | the user says | preset |
   |---|---|

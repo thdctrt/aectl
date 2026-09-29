@@ -33,6 +33,7 @@ export const USAGE = `ae - drive Adobe After Effects from the shell (macOS). See
   ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env] [--mark [--label N]]
   ae beats music.wav [--fps 25] [--offset F] [...]   accents (onsets) in comp frames; --env: loudness per frame
   ae export "Comp" [--preset youtube-1080] [--out file] [--full | --from F --to F] [--fit pad|crop] [--force] [--ame [--wait]]
+  ae export "Comp" --quick [--res half] [...]   frames via snap instead of the render queue: fast previews, no audio
   ae export --list                (presets: youtube-1080, youtube-4k, shorts, square, web, prores, prores-alpha, webm-alpha, gif)
   ae save [--backup] [--status] [--as file.aep]
   ae doctor                       check node/ffmpeg/AE/permissions/prefs      ae selftest [--keep]

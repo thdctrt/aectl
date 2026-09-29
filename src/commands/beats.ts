@@ -1,6 +1,6 @@
 // ae beats: musical accents (onsets) of an audio layer, in the frames of the comp it sits in.
 import { int, parseArgs, str } from "../args.ts";
-import { decodeMono, loudness, onsets, SR } from "../audio.ts";
+import { decodeMono, loudness, onsets, SR, tempo } from "../audio.ts";
 import { readLog, runSnippet } from "../runner.ts";
 import { die, err, isFile, jsstr, out, run } from "../util.ts";
 
@@ -35,7 +35,9 @@ export function analyse(pl: Placement, o: { from?: number; to?: number; minGap?:
   for (const h of hits) h.strength = max > 0 ? h.strength / max : 0; // 1 = strongest in the range
   const body = x.subarray(Math.round(pre * SR));
   const env = o.env ? loudness(body, 1 / pl.fps / pl.stretch).map((db, i) => ({ frame: Math.round(toFrame(i / pl.fps / pl.stretch)), db })) : [];
-  return { from, to, hits, env };
+  // the tempo of the music as it plays in the comp (a stretched layer plays slower)
+  const bpm = tempo(x) / pl.stretch;
+  return { from, to, hits, env, bpm: isNaN(bpm) ? NaN : Math.round(bpm * 10) / 10 };
 }
 
 export async function cmdBeats(argv: string[]): Promise<number> {
@@ -84,6 +86,7 @@ export async function cmdBeats(argv: string[]): Promise<number> {
   const top = opt("--top");
   if (top !== undefined) hits = [...hits].sort((a, b) => b.strength - a.strength).slice(0, top).sort((a, b) => a.frame - b.frame);
   err(`ae: ${hits.length} onsets, ${where}, ${res.from}..${res.to}; strength 0..1 (1 = strongest here)`);
+  if (!isNaN(res.bpm)) err(`ae: tempo ~${res.bpm} BPM, a beat every ${+((60 / res.bpm) * pl.fps).toFixed(2)} frames (could also be half or double)`);
   for (const h of hits) out(`${String(h.frame).padStart(6)}  ${h.strength.toFixed(2)}  ${"#".repeat(Math.max(1, Math.round(h.strength * 20)))}`);
   if (p.opts["--env"]) {
     const max = Math.max(...res.env.map((e) => e.db));

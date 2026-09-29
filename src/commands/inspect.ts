@@ -85,7 +85,8 @@ export async function cmdSnap(argv: string[]): Promise<number> {
   if (!RES.includes(res)) die("--res must be full|half|third|quarter");
   const frames = parseFrames(spec);
   const prefix = str(p, "--prefix") || comp.replace(/[^A-Za-z0-9_-]/g, "_");
-  const dir = abspath(str(p, "--out") || path.join(WORK, "snap", prefix));
+  // one folder per comp whatever the prefix, as documented: several prefixes of one comp land side by side
+  const dir = abspath(str(p, "--out") || path.join(WORK, "snap", comp.replace(/[^A-Za-z0-9_-]/g, "_")));
   const r = await snapFrames(comp, frames, dir, prefix, res, crop, p.opts["--timeout"] ? Number(p.opts["--timeout"]) : undefined);
   if (r.code) return r.code;
   for (const c of r.cells) out(c.file);
