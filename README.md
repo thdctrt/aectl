@@ -26,6 +26,8 @@ ae graph "Main" "Title" pos               # value + speed curves: see the easing
   into one image that an agent (or you) can look at. `ae graph` draws the motion curves of a property.
 - **Works with you, not around you.** `ae sel` reads your selection and playhead, `ae markers` reads the notes you
   leave as markers, and `ae run --diff` shows exactly what a script changed.
+- **A tutor in your timeline.** Ask the agent to teach you instead of doing the work: it leaves the tasks as markers
+  where they happen, checks what you did, and hints before it takes over. See [below](#learning-after-effects-with-your-agent).
 - **Helpers for the parts AE gets wrong.** Trims that silently don't stick, Source Text read through a typewriter
   expression, keyframe ease arrays of the wrong length, `"x" + array` throwing. See the pitfalls in the
   [reference](skills/after-effects/SKILL.md#pitfalls-all-handled-by-the-libcli-keep-them-in-mind-for-raw-code).
@@ -96,6 +98,36 @@ AE.run("Retime intro", function (log) {
 
 Everything is in [`skills/after-effects/SKILL.md`](skills/after-effects/SKILL.md): every command and option, the
 full `AE.*` API, and the pitfalls. It doubles as the skill that tells an agent how to use the tool.
+
+## Learning After Effects with your agent
+
+An agent that can see and edit your project can also teach you, in your own timeline. Ask it to ("teach me easing",
+"show me how parenting works, I want to do it myself") and it turns the lesson into markers: a short task at the frame
+and on the layer where it happens, which you then do by hand.
+
+```
+$ ae markers "Practice"
+COMP 'Practice' id=12
+  f0 #1 'Box' 'try 1/3: select both Position keys (P), make them ease' label=9
+  f45 #1 'Box' 'try 2/3: make it land softer (Graph Editor)' label=9
+  f55 comp 'try 3/3: start the move 10 frames later' label=9
+```
+
+- **It works on your project, or on a practice comp** it builds with the problem already in it: a box on linear keys
+  to ease, a title to parent to a null, a layer to trim to the beat.
+- **It checks what you did.** When you say "done", it compares the layer with how it was before the step (`ae dump`),
+  reads the ease you made (`ae graph`: peak/avg 1.00 means still linear), looks at the frame (`ae snap`) and tells you
+  what worked and what is off.
+- **Hints come in steps**: first the goal, then where to look (panel, property, shortcut), then the exact clicks. Only
+  if you ask does it do the step itself, with a before/after sheet (`ae run --ab`), and Cmd+Z lets you try again.
+- **It works both ways.** Leave a marker starting with `?` ("? why does it jump here") and ask the agent to read your
+  markers: it looks at that frame and explains. To learn from someone else's template, ask for a tour: it leaves
+  `note` markers on the interesting parts (an expression, a control layer, a precomp) and walks you through them.
+- **Nothing sticks around.** The lesson markers share one prefix and label, and the agent removes them (and the
+  practice comp) at the end. It never saves the project.
+
+This is a separate skill, [`after-effects-tutor`](skills/after-effects-tutor/SKILL.md), installed with the plugin. Only
+its one-line description sits in the agent's context until you ask to learn, so it costs nothing in other sessions.
 
 ## Commands
 

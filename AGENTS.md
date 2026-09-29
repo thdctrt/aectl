@@ -15,6 +15,7 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 | `test/*.test.ts` | vitest suite: lint rules, CLI exit codes and messages, the hook |
 | `tests/selftest.jsx`, `tests/cleanup.jsx` | self-test inside AE, in a throwaway comp, and its idempotent cleanup |
 | `skills/after-effects/SKILL.md` | user and agent reference; shipped as the plugin's skill |
+| `skills/after-effects-tutor/SKILL.md` | a second skill: lessons as markers in the user's timeline. Separate so its text loads only when someone wants to learn |
 | `hooks/hooks.json` | plugin hook: `ae hook` lints every `.jsx` Claude writes or edits |
 | `completions/_ae` | zsh completion, printed by `ae completion zsh` |
 | `package.json`, `.claude-plugin/` | npm package (`aectl`, bins `ae` and `aectl`) and Claude Code plugin/marketplace manifests |
@@ -49,7 +50,8 @@ Claude Code skill), with the full CLI, the `AE.*` API and the AE pitfalls.
 - **Nothing personal in the repo**: no absolute user paths, no real project or comp names in examples or tests.
   Use neutral names (`Main`, `Title`, `Intro`).
 - **Keep `SKILL.md` lean.** Every agent that uses the tool loads it in full (about 4k tokens). Put material that
-  only matters for developing the toolkit here, not there.
+  only matters for developing the toolkit here, not there. Workflows that only some users need (like teaching) go
+  in a skill of their own under `skills/`: until it is used, only its description costs context.
 - Commit messages: short and plain, without attribution trailers such as `Co-Authored-By`.
 
 ## Checks

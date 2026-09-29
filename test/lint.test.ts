@@ -176,7 +176,7 @@ describe("AE namespace", () => {
   it("knows every AE.* used in the docs and tests", () => {
     const m = aeMembers(LIB);
     const typoExamples = new Set(["setTxt"]); // the docs show it as the lint's "did you mean" example
-    for (const f of ["skills/after-effects/SKILL.md", "README.md", "AGENTS.md", "tests/selftest.jsx", "tests/cleanup.jsx"]) {
+    for (const f of ["skills/after-effects/SKILL.md", "skills/after-effects-tutor/SKILL.md", "README.md", "AGENTS.md", "tests/selftest.jsx", "tests/cleanup.jsx"]) {
       for (const [, name] of readFileSync(path.join(ROOT, f), "utf8").matchAll(/\bAE\.([A-Za-z_$][\w$]*)/g)) {
         if (typoExamples.has(name)) continue;
         expect(m.has(name), `AE.${name} in ${f}`).toBe(true);
