@@ -1,6 +1,6 @@
 {
   "name": "aectl",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Drive Adobe After Effects from the shell or an AI agent: lint + run ExtendScript as one undo step, dump comps, render frames to contact sheets.",
   "bin": {
     "ae": "ae",

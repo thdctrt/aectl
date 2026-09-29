@@ -1,7 +1,7 @@
 {
   "name": "aectl",
   "description": "Drive a running Adobe After Effects from Claude Code: inspect comps, run linted ExtendScript as one undo step, render frames to contact sheets.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "thdctrt"
   },
