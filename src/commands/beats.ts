@@ -4,7 +4,7 @@ import { decodeMono, loudness, onsets, SR } from "../audio.ts";
 import { readLog, runSnippet } from "../runner.ts";
 import { die, err, isFile, jsstr, out, run } from "../util.ts";
 
-const USAGE = 'usage: ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env]\n' +
+const USAGE = 'usage: ae beats "Comp" --layer "Music" [--from F] [--to F] [--top N] [--min-gap F] [--threshold 0.15] [--env] [--mark [--label 0-16]]\n' +
   "       ae beats file.wav [--fps 25] [--offset F] [...]   (no AE: the file starts at comp frame --offset)";
 
 /** Where the audio sits in the comp: comp frame = (start + sourceSeconds * stretch) * fps, audible from inF to outF. */
@@ -39,12 +39,14 @@ export function analyse(pl: Placement, o: { from?: number; to?: number; minGap?:
 }
 
 export async function cmdBeats(argv: string[]): Promise<number> {
-  const p = parseArgs(argv, "beats", ["--layer", "--from", "--to", "--fps", "--offset", "--top", "--min-gap", "--threshold"], ["--env"]);
+  const p = parseArgs(argv, "beats", ["--layer", "--from", "--to", "--fps", "--offset", "--top", "--min-gap", "--threshold", "--label"], ["--env", "--mark"]);
   const target = p.pos[0];
   if (!target || p.pos.length > 1) die(USAGE);
   const threshold = str(p, "--threshold") ? Number(str(p, "--threshold")) : undefined;
   if (threshold !== undefined && !(threshold > 0 && threshold < 1)) die("--threshold must be between 0 and 1");
   const opt = (name: string) => (p.opts[name] === undefined ? undefined : int(p, name, 0));
+  if (p.opts["--mark"] && !p.opts["--layer"]) die('beats: --mark puts markers on the audio layer: ae beats "Comp" --layer "Music" --mark');
+  if (p.opts["--label"] !== undefined && !p.opts["--mark"]) die("beats: --label goes with --mark");
   let pl: Placement;
   let where: string;
   if (!p.opts["--layer"]) {
@@ -88,5 +90,18 @@ export async function cmdBeats(argv: string[]): Promise<number> {
     out("frame  dBFS  loudness");
     for (const e of res.env) out(`${String(e.frame).padStart(6)}  ${e.db.toFixed(1).padStart(5)}  ${"=".repeat(Math.max(0, Math.round((e.db - max + 40) / 2)))}`);
   }
+  if (p.opts["--mark"] && hits.length) return markBeats(target, str(p, "--layer"), hits, opt("--label"));
   return 0;
+}
+
+/** Layer markers "beat 0.83" at the onset frames (one undo step "ae beats"; they move with the layer). */
+async function markBeats(comp: string, layer: string, hits: { frame: number; strength: number }[], label: number | undefined): Promise<number> {
+  const code =
+    `var __L = AE.layer(AE.comp(${jsstr(comp)}), ${jsstr(layer)});\n` +
+    `var __f = [${hits.map((h) => h.frame).join(",")}], __s = [${hits.map((h) => h.strength.toFixed(2)).join(",")}];\n` +
+    `for (var __i = 0; __i < __f.length; __i++) { AE.marker(__L, __f[__i], "beat " + __s[__i]${label === undefined ? "" : `, {label: ${label}}`}); }\n` +
+    `log(__f.length + " beat marker(s) on '" + __L.name + "'");\n`;
+  const r = await runSnippet("beats", "mark", code, { undo: true, label: "ae beats", rollback: true, quiet: true });
+  if (!r.code) err(readLog(r.log).split("\n").find((l) => l.includes("beat marker")) ?? "");
+  return r.code;
 }

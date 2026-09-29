@@ -26,6 +26,13 @@ _ae() {
     'check:syntax + ES3 lint only'
     'dump:print one comp in detail'
     'tree:project overview + layers of the active comp'
+    'sel:active comp, playhead, selected layers/properties/keys'
+    'markers:comp and layer markers with comments'
+    'mark:add a marker'
+    'health:missing footage/fonts, expression errors, off-screen layers'
+    'find:search names, text, expressions, files, effects, markers'
+    'effects:search installed effects'
+    'graph:value and speed curves of a property'
     'snap:render comp frames to PNG'
     'sheet:contact sheet from images'
     'measure:ink bounding box of an image, or how far one is off from another'
@@ -37,6 +44,7 @@ _ae() {
     'doctor:check the setup'
     'selftest:run the self-test in a throwaway comp'
     'completion:print the shell completion script'
+    'mcp:MCP server on stdin/stdout'
     'help:show usage'
   )
   if (( CURRENT == 2 )); then
@@ -57,7 +65,14 @@ _ae() {
         '(--undo)--ro[no undo group]' \
         '(--ro)--undo[force one undo group]' \
         '--no-rollback[keep what a failed run changed]' \
-        '--timeout[seconds to wait for the log]:seconds:' ;;
+        '--timeout[seconds to wait for the log]:seconds:' \
+        '--diff[print what the script changed]' \
+        '--ab[before/after sheet of this comp]:comp:_ae_comps' \
+        '--frames[frames for --ab]:frames:' \
+        '--res[render resolution for --ab]:resolution:(full half third quarter)' \
+        '--crop[region for --ab, comp pixels]:x,y,w,h:' \
+        '--cols[sheet columns]:columns:' \
+        '--width[sheet cell width in px]:px:' ;;
     check)
       _arguments '1:script:_files -g "*.jsx(-.)"' ;;
     eval)
@@ -72,6 +87,39 @@ _ae() {
         '--at[values at this comp frame]:frame:' \
         '--props[also every changed static value (shape contents, masks, text animators)]' \
         '--raw-text[true Source Text (one undo step)]' ;;
+    sel|mcp)
+      ;;
+    markers)
+      _arguments '1:comp:_ae_comps' '--all[every comp]' ;;
+    mark)
+      _arguments \
+        '1:comp:_ae_comps' \
+        '2:frame:' \
+        '3:comment:' \
+        '--layer[put it on this layer]:layer:_ae_layers' \
+        '--dur[length in frames]:frames:' \
+        '--label[label colour 0-16]:label:' ;;
+    health)
+      _arguments '1:comp:_ae_comps' '--all[every comp]' '--safe[text safe margin, % of each side]:percent:' ;;
+    find)
+      _arguments \
+        '1:text:' \
+        '--in[scopes]:scopes:_values -s , scope name text expr file effect marker' \
+        '--comp[only this comp]:comp:_ae_comps' \
+        '--regex[text is a regular expression]' ;;
+    effects)
+      _arguments '*:word:' '--refresh[re-read the list from AE]' ;;
+    graph)
+      _arguments \
+        '1:comp:_ae_comps' \
+        '2:layer:_ae_layers' \
+        '3:property path (Transform/Position, pos, scale, rot, opacity):' \
+        '--from[first frame]:frame:' \
+        '--to[last frame]:frame:' \
+        '--step[sample every N frames]:frames:' \
+        '--out[png file]:file:_files -g "*.png(-.)"' \
+        '--width[px]:px:' \
+        '--height[px]:px:' ;;
     tree)
       _arguments '--main[comp whose layers to list]:comp:_ae_comps' ;;
     snap)
@@ -101,7 +149,9 @@ _ae() {
         '--threshold[drop onsets weaker than this share of the strongest]:0-1:' \
         '--env[also loudness per frame]' \
         '--fps[file only: comp frame rate]:fps:' \
-        '--offset[file only: comp frame where the file starts]:frame:' ;;
+        '--offset[file only: comp frame where the file starts]:frame:' \
+        '--mark[add a marker at each accent on the layer]' \
+        '--label[with --mark: marker label 0-16]:label:' ;;
     measure)
       _arguments \
         '1:image:_files -g "*.(#i)(png|jpg|jpeg)(-.)"' \
